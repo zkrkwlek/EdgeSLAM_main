@@ -885,12 +885,6 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 	std::chrono::high_resolution_clock::time_point t_track_start = std::chrono::high_resolution_clock::now();
 	EdgeSLAM::Tracker::TrackSimulation(POOL, SLAM, id, src, frame, img, frame_ts);
 	std::chrono::high_resolution_clock::time_point t_track_end = std::chrono::high_resolution_clock::now();
-	
-	/*{
-		std::stringstream ss;
-		ss << src << ",in," << id <<"," <<User->mnQuality<< "," << n2 << std::endl;
-		SLAM->EvaluationTraffic.push_back(ss.str());
-	}*/
 
 	auto trackStat = User->GetState();
 	bool bTrackSuccess = trackStat == EdgeSLAM::UserState::Success && frame->mvpMapPoints.size() > 0;
@@ -917,17 +911,20 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 		totaldata.push_back(kfdata);
 		totaldata.push_back(contentdata);
 		totaldata.push_back(planedata);
+		long long ts_end_graph = start.time_since_epoch().count();
+
 		auto du_upload = Utils::SendData(keyword, src, totaldata, id, received_ts);
 
 		if (bSaveLatency) {
 			//auto du_parsing = std::chrono::duration_cast<std::chrono::milliseconds>(t_parsing_end - t_parsing_start).count();
 			auto du_track = std::chrono::duration_cast<std::chrono::milliseconds>(t_track_end - t_track_start).count();
 			auto du_download = std::chrono::duration_cast<std::chrono::milliseconds>(t_down_end - t_down_start).count();
+			auto du_graph = ts_end_graph - ts;
 			int N = SLAM->GetConnectedDevice();
 			{
 				std::stringstream ss;
 				// "num,source,id,quality,download,processing,upload,size\n";
-				ss << N << "," << src << "," << id << "," << User->mnQuality << "," << du_download << "," << du_track << "," << du_upload << "," << totaldata.rows * sizeof(float) << std::endl;
+				ss << N << "," << src << "," << id << "," << User->mnQuality << "," << du_download << "," << du_track << "," << du_upload << "," << du_graph << "," << totaldata.rows * sizeof(float) << std::endl;
 				SLAM->EvaluationLatency.push_back(ss.str());
 			}
 		}
@@ -936,96 +933,12 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 			int N = SLAM->GetConnectedDevice();
 			std::stringstream ss;
 			// "num,source,method,type,id,quality,size,latency\n";
-			ss << N << "," << src << "," << "indirect,upload," << id<<"," << totaldata.rows * sizeof(float) << "," << du_upload << std::endl;
+			ss << N << "," << src << "," << "indirect,upload," << id<<"," << totaldata.rows * sizeof(float) << "," << du_upload<< std::endl;
 			SLAM->EvaluationVirtualObjectLatency.push_back(ss.str());
 		}
 
-
-		//if (nNetworkSimul > 0) {
-		//	std::chrono::high_resolution_clock::time_point test_start = std::chrono::high_resolution_clock::now();
-		//	for (int ni = 0; ni < nNetworkSimul; ni++) {
-		//		//POOL->EnqueueJob(NetworkDownloadSimulation, SLAM, url, id, User->mnQuality);
-		//		POOL->EnqueueJob(NetworkUploadSimulation, SLAM, keyword, keyword, id, totaldata, test_start);
-		//	}
-		//}
-
 	}
-	/*auto trackStat = User->GetState();
-	bool bSyncLocalMap = User->mbBaseLocalMap;
-	auto mapSynchedMPs = User->mapLastSyncedMPs.Get();
-	auto mapSendedMPs = User->mapLastSendedMPs.Get();*/
-
-	//if ( trackStat == EdgeSLAM::UserState::Success && frame->mvpMapPoints.size() > 0) {
-	//	
-	//	std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-	//	long long ts = start.time_since_epoch().count();
-	//	
-	//	int N = SLAM->GetConnectedDevice();
-
-	//	cv::Mat data = cv::Mat::zeros(0, 1, CV_32FC1);
-	//	{
-	//		cv::Mat Pcw = frame->GetPose();
-	//		cv::Mat Rcw = Pcw.rowRange(0, 3).colRange(0, 3);
-	//		cv::Mat tcw = Pcw.rowRange(0, 3).col(3);
-	//		//트래킹
-	//		cv::Mat trackData = cv::Mat::zeros(14, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
-	//		int nTrackData = 2;
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
-	//		trackData.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
-
-	//		int nTrack = 0;
-	//		for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++)
-	//		{
-	//			if (frame->mvpMapPoints[i])
-	//			{
-	//				if (!frame->mvbOutliers[i] && !frame->mvpMapPoints[i]->isBad())
-	//				{
-	//					int nDataIdx = 0;
-	//					auto kp = frame->mvKeys[i];
-	//					auto mp = frame->mvpMapPoints[i]->GetWorldPos();
-	//					int octave = kp.octave;
-	//					cv::Mat temp = cv::Mat::zeros(9, 1, CV_32FC1);
-	//					temp.at<float>(nDataIdx++) = kp.pt.x;
-	//					temp.at<float>(nDataIdx++) = kp.pt.y;
-	//					temp.at<float>(nDataIdx++) = (float)kp.octave;
-	//					temp.at<float>(nDataIdx++) = kp.angle;
-	//					temp.at<float>(nDataIdx++) = (float)frame->mvpMapPoints[i]->mnId;
-	//					temp.at<float>(nDataIdx++) = frame->mvpMapPoints[i]->mnPlaneID;// label or plane
-	//					temp.at<float>(nDataIdx++) = mp.at<float>(0);
-	//					temp.at<float>(nDataIdx++) = mp.at<float>(1);
-	//					temp.at<float>(nDataIdx++) = mp.at<float>(2);
-	//					trackData.push_back(temp);
-	//					nTrack++;
-	//				}
-	//			}
-	//		}
-	//		/*if (nTrack == 0)
-	//			trackData.push_back(cv::Mat::zeros(4500, 1, CV_32FC1));
-	//		trackData.at<float>(0) = trackData.rows;
-	//		trackData.at<float>(1) = (float)nTrack;*/
-	//		data.push_back(trackData);
-	//	}
-	//	std::chrono::high_resolution_clock::time_point t_up_start = std::chrono::high_resolution_clock::now();
-	//	EdgeSLAM::Tracker::SendDeviceTrackingData(SLAM, src, data, id, ts);
-	//	std::chrono::high_resolution_clock::time_point t_up_end = std::chrono::high_resolution_clock::now();
-
 	
-
-	//	float t_track = du_track / 1000.0;
-	//	float t_parsing = du_parsing / 1000.0;
-
-	
-	//}
 	frame->mnShared--;
 	User->mnUsed--;
 }
@@ -1108,25 +1021,21 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 		totaldata.push_back(kfdata);
 		totaldata.push_back(contentdata);
 		totaldata.push_back(planedata);
+		long long ts_end_graph = start.time_since_epoch().count();
 		auto du_upload =  Utils::SendData(keyword, src, totaldata, id, received_ts);
-
-		if (nNetworkSimul > 0) {
-			std::chrono::high_resolution_clock::time_point test_start = std::chrono::high_resolution_clock::now();
-			for (int ni = 0; ni < nNetworkSimul; ni++) {
-				//POOL->EnqueueJob(NetworkDownloadSimulation, SLAM, url, id, User->mnQuality);
-				POOL->EnqueueJob(NetworkUploadSimulation, SLAM, keyword, keyword, id, totaldata,test_start);
-			}
-		}
 
 		if (bSaveLatency) {
 			auto du_track = std::chrono::duration_cast<std::chrono::milliseconds>(t_track_end - t_track_start).count();
 			auto du_download = std::chrono::duration_cast<std::chrono::milliseconds>(t_down_end - t_down_start).count();
+			auto du_graph = (ts_end_graph - ts)/1000000.0;
+			auto du_total = (ts_end_graph - t_down_start.time_since_epoch().count()) / 1000000.0;
+			auto du_preprocessing = std::chrono::duration_cast<std::chrono::milliseconds>(t_track_start - t_down_end).count();
 
 			int N = SLAM->GetConnectedDevice();
 			{
 				std::stringstream ss;
 				// "num,source,id,quality,download,processing,upload,size\n";
-				ss << N << "," << src << "," << id << "," << User->mnQuality << "," << du_download << "," << du_track << "," << du_upload << "," << totaldata.rows * sizeof(float) << std::endl;
+				ss << N << "," << src << "," << id << "," << User->mnQuality << "," << du_download << "," << du_track << "," << du_upload <<","<<du_graph <<","<<du_preprocessing<<"," << du_total << "," << totaldata.rows * sizeof(float) << std::endl;
 				SLAM->EvaluationLatency.push_back(ss.str());
 			}
 		}
@@ -1137,116 +1046,7 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 			ss << N << "," << src << "," << "indirect,upload," << id << "," << totaldata.rows * sizeof(float) << "," << du_upload << std::endl;
 			SLAM->EvaluationVirtualObjectLatency.push_back(ss.str());
 		}
-		
-		/*int nextidx = totaldata.at<float>(0);
-		int parsingid = totaldata.at<float>(1);
-		while (nextidx < totaldata.rows) {
-			
-			std::cout <<id<< " == data test =" <<parsingid<<" " << nextidx << " " << totaldata.rows << std::endl;
-			nextidx += totaldata.at<float>(nextidx);
-			if (nextidx < totaldata.rows) {
-				parsingid = totaldata.at<float>(nextidx + 1);
-			}
-		}
-		std::cout <<"size = " << totaldata.rows << " " << kfdata.rows << " " << contentdata.rows << " " << planedata.rows << std::endl;
-		std::cout << "id = " <<  kfdata.at<float>(1) << " " << contentdata.at<float>(1) << " " << planedata.at<float>(1) << std::endl;*/
-		 
-		//auto mapSynchedMPs = User->mapLastSyncedMPs.Get();
-		//auto mapSendedMPs  = User->mapLastSendedMPs.Get();
-		//
-		//cv::Mat kfdata = cv::Mat::zeros(13, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
-		//cv::Mat mpdata = cv::Mat::zeros(1, 1, CV_32FC1);
-		//int nTrackData = 1;
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
-		//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
-
-		//int Nkf = 0;
-		//int Nmp = 0;
-		//for (int i = 0, N = frame->N; i < N; i++) {
-		//	auto pMPi = frame->mvpMapPoints[i];
-		//	if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i]) {
-		//		continue;
-		//	}
-		//	
-		//	//갱신으로 비교
-		//	bool bTrialSync = false;
-		//	long long lastUpdated = pMPi->mnLastUpdatedTime;
-		//	if (mapSynchedMPs.count(pMPi->mnId)) {
-		//		auto lastSynced = mapSynchedMPs[pMPi->mnId];
-		//		if (lastUpdated > lastSynced) {
-		//			bTrialSync = true;
-		//		}
-		//	}
-		//	else {
-		//		bTrialSync = true;
-		//	}
-
-		//	//전송으로 비교
-		//	if (mapSendedMPs.count(pMPi->mnId)) {
-		//		auto lastSended = mapSendedMPs[pMPi->mnId];
-		//		int diff = id - lastSended;
-		//		if (diff >= nQueueKFs)
-		//			bTrialSync = true;
-		//	}
-		//	else {
-		//		bTrialSync = true;
-		//	}
-		//	
-		//	int nkfidx = 0;
-		//	auto kp = frame->mvKeys[i];
-		//	int octave = kp.octave;
-		//	float fID = (float)pMPi->mnId;
-		//	cv::Mat temp1 = cv::Mat::zeros(5, 1, CV_32FC1);
-		//	temp1.at<float>(nkfidx++) = fID;
-		//	temp1.at<float>(nkfidx++) = kp.pt.x;
-		//	temp1.at<float>(nkfidx++) = kp.pt.y;
-		//	temp1.at<float>(nkfidx++) = (float)kp.octave;
-		//	temp1.at<float>(nkfidx++) = kp.angle;
-		//	kfdata.push_back(temp1);
-		//	Nkf++;
-
-		//	if (bTrialSync) {
-		//		//맵포인트 갱신 또는 추가.
-		//		User->mapLastSyncedMPs.Update(pMPi->mnId, ts);
-		//		User->mapLastSendedMPs.Update(pMPi->mnId, id);
-
-		//		auto mp = pMPi->GetWorldPos();
-		//		cv::Mat temp2 = cv::Mat::zeros(5, 1, CV_32FC1);
-		//		int nmpidx = 0;
-		//		temp2.at<float>(nmpidx++) = fID;
-		//		temp2.at<float>(nmpidx++) = pMPi->mnPlaneID;// label or plane
-		//		temp2.at<float>(nmpidx++) = mp.at<float>(0);
-		//		temp2.at<float>(nmpidx++) = mp.at<float>(1);
-		//		temp2.at<float>(nmpidx++) = mp.at<float>(2);
-		//		mpdata.push_back(temp2);
-		//		Nmp++;
-		//	}
-		//}//for
-
-		//kfdata.at<float>(0) = (float)Nkf;
-		//mpdata.at<float>(0) = (float)Nmp;
-
-		//totaldata.at<float>(0) = 1.0;
-		//totaldata.at<float>(1) = (float)(kfdata.rows + mpdata.rows + 1);
-		//totaldata.push_back(kfdata);
-		//totaldata.push_back(mpdata);
-
-		//POOL->EnqueueJob(EdgeSLAM::Tracker::SendDeviceTrackingData, SLAM, src, totaldata, id, ts);
-		//POOL->EnqueueJob(SemanticSLAM::ContentProcessor::ShareContent, SLAM, src, id);
-		//POOL->EnqueueJob(SemanticSLAM::PlaneEstimator::UpdateLocalMapPlanes, SLAM, src, id); //에러 확인하기
-		////std::cout << "test = " << Nkf << " " << Nmp <<" "<<totaldata.at<float>(2+13+Nkf*5) << std::endl;
-		////std::cout << "Update test = " << Ntest << "  " << Ntotal << std::endl;
-
+	
 		////시각화 및 칼만필터 적용
 		//visualize
 		for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++) {
@@ -2033,9 +1833,9 @@ int main(int argc, char* argv[])
 		receivedKeywords.push_back("Depth");
 				
 		receivedKeywords.push_back("DevicePosition");
-		receivedKeywords.push_back("RPlaneEstimation");
-		receivedKeywords.push_back("ReferenceFrame");
-		receivedKeywords.push_back("Keypoints");
+		//receivedKeywords.push_back("RPlaneEstimation");
+		//receivedKeywords.push_back("ReferenceFrame");
+		//receivedKeywords.push_back("Keypoints");
 		//receivedKeywords.push_back("FeatureDetection");
 
 		receivedKeywords.push_back("VO.CREATE");
@@ -2184,13 +1984,16 @@ int main(int argc, char* argv[])
 		}
 		
 		std::chrono::high_resolution_clock::time_point t_parsing_start = std::chrono::high_resolution_clock::now();
-
+		
 		if (document["keyword"].IsString() && document["id"].IsInt()) {
 			int id = document["id"].GetInt();
 			double ts = std::stod(document["ts"].GetString());
 			std::string keyword = document["keyword"].GetString();
 			std::string src = document["src"].GetString();
 			std::string type2 = document["type2"].GetString();
+
+			/*if(keyword=="Image")
+				std::cout << std::setprecision(16) <<"latency test = " <<keyword<<", " << (t_parsing_start.time_since_epoch().count() - ts) / 1000000.0 << std::endl;*/
 
 			//////load data with keyword
 			int id2 = -1;
@@ -2360,7 +2163,7 @@ int main(int argc, char* argv[])
 						//std::cout << "save start = " << src << std::endl;
 						if (bSaveLatency){
 							std::cout << "save start" << std::endl;
-							SLAM->Save(latencyPath, SLAM->EvaluationLatency, "num,source,id,quality,download,processing,upload,size");
+							SLAM->Save(latencyPath, SLAM->EvaluationLatency, "num,source,id,quality,download,processing,upload,graph,preprocessing,total,size");
 							std::cout << "save end" << std::endl;
 						}
 						if (bSaveVOLatency)
