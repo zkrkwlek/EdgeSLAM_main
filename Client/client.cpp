@@ -60,6 +60,9 @@ int main() {
     //udp
     std::vector<std::string> receivedKeywords;
     receivedKeywords.push_back("Depth");
+    receivedKeywords.push_back("ObjectDetection");
+    receivedKeywords.push_back("Segmentation");
+
     std::string src = "depth_receiver";
     for (int i = 0, iend = receivedKeywords.size(); i < iend; i++) {
         std::stringstream ss;
@@ -110,11 +113,17 @@ int main() {
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
         res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
-        
+         
         cv::Mat temp = cv::Mat(response_data.size(), 1, CV_8UC1, (void*)response_data.data());
-        cv::Mat depth = cv::imdecode(temp, cv::IMREAD_ANYDEPTH);
-        cv::imwrite("./depth.png",depth);
-        cv::waitKey(1);
+
+        if(keyword == "Depth")
+        {
+            cv::Mat depth = cv::imdecode(temp, cv::IMREAD_ANYDEPTH);
+            cv::imwrite("./depth.png",depth);
+            cv::waitKey(1);
+        }
+        if(keywro)
+        
         //std::cout<<keyword<<" "<<id<<" "<<src<<"="<<response_data.size()<<std::endl;
         //std::cout<<ss.str()<<std::endl;
     }
