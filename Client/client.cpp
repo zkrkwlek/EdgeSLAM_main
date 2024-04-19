@@ -48,10 +48,20 @@ int main() {
     // POST 데이터 설정
     std::string post_data = R"({"src":"depth_receiver","keyword":"testmethod","type1":"server","type2":"NONE","capacity":30})";
     {
-        //std::stringstream ss;
-        //ss << "{\"src\":\""<<"depth_receiver"<<"\","<<"\"keyword\":\"" << "test_method" << "\",\"type1\":\"server\",\"type2\":\"" << "NONE" << "\""<<",\"capacity\":"<<300<<"}"; //test\"}";
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
-
+        json j;
+        j["src"]="depth_receiver";
+        j["keyword"]="testmethod";
+        j["type1"]="server";
+        j["type2"]="NONE";
+        j["capacity"]=30;
+        std::stringstream ss;
+        ss << "{\"src\":\""<<"depth_receiver"<<"\","<<"\"keyword\":\"" << "testmethod" << "\",\"type1\":\"server\",\"type2\":\"" << "NONE" << "\""<<",\"capacity\":"<<30<<"}"; //test\"}";
+        std::cout<<ss.str()<<std::endl;
+        std::cout<<post_data<<std::endl<<post_data.size()<<std::endl;
+        std::cout<<j.dump()<<std::endl<<j.dump().size()<<std::endl;
+        //std::string post_data = j.dump();
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, post_data.size());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,post_data.c_str());
     }
     
     res = curl_easy_perform(curl);
@@ -118,12 +128,42 @@ int main() {
 
         if(keyword == "Depth")
         {
+            if(id % 4 ==0){
+                curl = curl_easy_init();
+                std::stringstream ssurl;
+                keyword = "testmethod";
+                ssurl<<"http://143.248.6.143:35005/Store?keyword="<<keyword<<"&id=" << id << "&src=" << src << "&type2=" << src;
+                curl_easy_setopt(curl, CURLOPT_URL, ssurl.str().c_str());
+                //curl_easy_setopt(curl, CURLOPT_URL, "http://143.248.6.143:35005/Store");
+                curl_easy_setopt(curl, CURLOPT_POST, 1);
+                struct curl_slist *list = NULL;
+                list = curl_slist_append(list, "Content-Type: application/json");
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+                // POST 데이터 설정
+                // std::string post_data = R"({"src":"depth_receiver","keyword":"testmethod","type1":"server","type2":"NONE","capacity":30})";
+                // {
+                //     std::stringstream ss;
+                    
+                //     ss << "?keyword="<<keyword<<"&id=" << id << "&src=" << src << "&type2=" << src;
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, temp.rows);
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, temp.data);
+                     
+                // }
+                
+                res = curl_easy_perform(curl);
+                curl_easy_cleanup(curl);
+
+            }
             cv::Mat depth = cv::imdecode(temp, cv::IMREAD_ANYDEPTH);
             cv::imwrite("./depth.png",depth);
             cv::waitKey(1);
         }
-        if(keywro)
-        
+        if(keyword == "ObjectDetection"){
+            std::cout<<"obj"<<std::endl;
+        }
+        if(keyword == "Segmentation"){
+            std::cout<<"seg"<<std::endl;
+        }
         //std::cout<<keyword<<" "<<id<<" "<<src<<"="<<response_data.size()<<std::endl;
         //std::cout<<ss.str()<<std::endl;
     }
