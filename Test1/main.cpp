@@ -88,7 +88,9 @@ void LoadParameter(std::string path) {
 }
 
 //argv
+std::string src;
 std::string datakeyword;
+std::string rgbfile = "rgb.txt";
 bool bMapping = false;
 bool bTracking = false;
 bool bSyncLocalMap = false;
@@ -99,6 +101,13 @@ std::string latencyPath;
 bool bSaveTrajectory = false;
 std::string trajectoryPath;
 bool bCaptureDepth = false;
+bool bGridCommu = false;
+bool bPlaneGBA = false;
+
+bool bPlay = false; //종료 없이 재생
+double ts_last;
+cv::Mat img_last;
+cv::Mat depth_last;
 
 bool mbDelay = true;
 bool mbSuccessInitialization = false;
@@ -133,6 +142,124 @@ ConcurrentVector<std::string> EvaluationLatency;
 std::vector<cv::Mat> vecTrajectories;
 std::vector<double> vecTimestamps;
 int nVODataSize = 17;
+
+//시각화 윈도우
+std::string strWindowName = "CLIENT::Display";
+cv::Mat MatDisplay;
+cv::Mat MatImage;
+std::mutex MutexDisplay;
+
+int nLastID = -1;
+int nSendID = -1;
+bool bDone = true;
+int nReID;
+int nVoID = 1;
+int nVOID = 1;
+cv::Mat MatVO = cv::Mat::ones(4, 1, CV_32FC1)*-10000;
+std::mutex MutexVO;
+
+//카메라 자세
+cv::Mat Pose = cv::Mat::eye( 4, 4, CV_32FC1);
+cv::Mat Kinv;
+cv::Mat plane = cv::Mat::zeros(4, 1, CV_32FC1);
+//평면 정보
+
+void CallBackFunc(int event, int x, int y, int flags, void* userdata)
+{
+	//float* tempData = (float*)userdata;
+	WebAPI* API = (WebAPI*)userdata;
+	if (event == cv::EVENT_LBUTTONDOWN)
+	{
+		//가상 객체 생성
+		cv::Mat Tinv = pCameraPose->GetInversePose();
+		cv::Mat O = pCameraPose->GetCenter();
+		cv::Mat normal = plane.rowRange(0, 3).clone();
+		cv::Mat x3D = (cv::Mat_<float>(3, 1) << x, y, 1.0);
+		cv::Mat Xw = Kinv * x3D;
+		Xw.push_back(cv::Mat::ones(1, 1, CV_32FC1)); //3x1->4x1
+		Xw = Tinv * Xw; // 4x4 x 4 x 1
+		Xw = Xw.rowRange(0, 3) / Xw.at<float>(3); // 4x1 -> 3x1
+		cv::Mat dir = Xw - O; //3x1
+		float dist = plane.at<float>(3);
+		float a = -normal.dot(dir);
+		if (std::abs(a) < 0.000001)
+			return;
+		float d = (normal.dot(O) + dist) / a;
+		if (d < 0.0)
+			return;
+		cv::Mat Xp = O + dir * d;
+		Xp.at<float>(1) *= -1.0;
+		//메세지 전송
+		
+		cv::Mat vo = cv::Mat::zeros(nVODataSize, 1, CV_32FC1);
+		vo.at<float>(0) = 17;
+		Xp.copyTo(vo.rowRange(3, 6));
+		std::chrono::high_resolution_clock::time_point t_up_start = std::chrono::high_resolution_clock::now();
+		std::stringstream ss;
+		ss << "/Store?keyword=" << "VO.CREATE" << "&id=" << nVOID++ << "&src=" << src << "&ts=" << t_up_start.time_since_epoch().count();// << " & type2 = " << user->userName;
+		API->Send(ss.str(), vo.data, vo.rows * sizeof(float));
+
+		////가상 객체 등록
+		//tempData[2] = (float)x - tempData[0];
+		//tempData[3] = (float)y;
+
+		//////button interface
+		//if (tempData[2] < 50.0 && y < 50) {
+		//	bSaveMap = !bSaveMap;
+		//}
+		//else if (tempData[2] < 50 && (y >= 50 && y < 100)) {
+		//	//bShowOnlyTrajectory = !bShowOnlyTrajectory;
+		//	bLoadMap = !bLoadMap;
+		//}
+		//////button interface
+	}
+}
+
+void Visualize() {
+
+	//윈도우 등록
+	MatDisplay = cv::Mat::zeros(h, w, CV_8UC3);
+	std::stringstream ss;
+	ss << strWindowName << "::" << src;
+	strWindowName = ss.str();
+	cv::imshow(strWindowName, MatDisplay);
+	//cv::moveWindow(strWindowName, mnDisplayX, mnDisplayY);
+	//평면과 카메라 자세 등이 가야 함.
+	/*mapControlData[8] = -90.0;
+	mapControlData[0] = mnWidth;
+	mapControlData[1] = mnVisScale;*/
+	WebAPI API("asdf", 123);
+	cv::setMouseCallback(strWindowName, CallBackFunc, (void*)(&API));
+
+	cv::Mat K = pCamera->K.clone();
+	while (bDone) {
+		//cv::imshow(MatDisplay)
+
+		cv::Mat T = pCameraPose->GetPose();
+		cv::Mat X;
+		cv::Mat vis;
+		{
+			std::unique_lock<std::mutex> lock(MutexVO);
+			X = MatVO.clone();
+		}
+		{
+			std::unique_lock<std::mutex> lock(MutexDisplay);
+			vis = MatImage.clone();
+		}
+		cv::Mat temp = T * X;
+		temp = temp.rowRange(0, 3);
+		temp = K * temp;
+		float d = temp.at<float>(2);
+		cv::Point2f pt(temp.at<float>(0) / d, temp.at<float>(1) / d);
+		cv::circle(vis, pt, 5, cv::Scalar(255, 0, 0), -1);
+		{
+			std::unique_lock<std::mutex> lock(MutexDisplay);
+			MatDisplay = vis.clone();
+		}
+		cv::imshow(strWindowName, MatDisplay);
+		cv::waitKey(20);
+	}
+}
 
 //전송 이미지 저장
 void StoreImage(int id, const cv::Mat& img) {
@@ -320,8 +447,60 @@ void UpdateLocalMapFromEdgeServer(float* data) {
 	//bReqLocalMap = false;
 	//nLastKeyFrameId = id;
 }
+
+void UpdateLocalPlane(float* data) {
+	int nSize = (int)data[0];
+	if (nSize == 2) {
+		return;
+	}
+	int N = (int)data[2];
+	int idx = 3;
+	for (int i = 0; i < N; i++) {
+		int id = (int)data[idx];
+		float nx = data[idx + 1];
+		float ny = data[idx + 2];
+		float nz = data[idx + 3];
+		float d  = data[idx + 4];
+		idx += 5;
+		plane.at<float>(0) = nx;
+		plane.at<float>(1) = ny;
+		plane.at<float>(2) = nz;
+		plane.at<float>(3) = d;
+		break;
+	}
+}
+
+void UpdateLocalContent(float* data) {
+	int Nconnect = (int)data[2];
+	int Ncontent = (int)data[3 + Nconnect];
+	int cidx = 4 + Nconnect; //vo idx
+
+	/*{
+		std::unique_lock<std::mutex> lock(MutexVO);
+		MatVO.at<float>(0) = -10000;
+		MatVO.at<float>(1) = -10000;
+		MatVO.at<float>(2) = -10000;
+	}*/
+
+	for (int j = 0; j < Ncontent; j++)
+	{
+		int len = (int)data[cidx];
+		cv::Mat X = cv::Mat::ones(4, 1, CV_32FC1);
+		X.at<float>(0) = data[cidx + 3];
+		X.at<float>(1) = -data[cidx + 4];
+		X.at<float>(2) = data[cidx + 5];
+		cidx += len;
+		
+		{
+			std::unique_lock<std::mutex> lock(MutexVO);
+			MatVO = X.clone();
+		}
+	}
+	
+}
+
 void ParsingData(int fid, float* totalData, int totalLength) {
-	int nextid = 0;
+	int nextid = 0;  
 	int size = (int)totalData[nextid];
 	int pid = (int)totalData[nextid + 1];
 	//std::cout << pid << " " << nextid << " " << size << " " << totalLength << std::endl;
@@ -351,10 +530,12 @@ void ParsingData(int fid, float* totalData, int totalLength) {
 		}
 		else if (pid == 3)
 		{
+			UpdateLocalContent(totalData + nextid);
 			//mContentManager.UpdateVirtualFrame(id, ref totalData, nextid, receivedTime, mExParam.bEdgeBase);
 		}
 		else if (pid == 4)
 		{
+			UpdateLocalPlane(totalData + nextid);
 			//mPlaneManager.UpdateLocalPlane(id, ref totalData, nextid);
 		}
 		//std::cout << size << " " << nextid << " " << totalLength << std::endl;
@@ -441,6 +622,7 @@ int Tracking(const cv::Mat& img, int id, double ts) {
 		Ow.copyTo(P.row(3));
 		vecTrajectories.push_back(T);
 		vecTimestamps.push_back(ts);
+		//P.copyTo(Pose.rowRange(0, 4).colRange(0, 3));
 	}
 	else {
 		pTracker->mTrackState = EdgeDeviceSLAM::TrackingState::Failed;
@@ -452,12 +634,6 @@ int Tracking(const cv::Mat& img, int id, double ts) {
 	//std::cout << "tracking test = " << nMatch << std::endl;
 	return -1;
 }
-
-int nLastID = -1;
-int nSendID = -1;
-bool bDone = true;
-int nReID;
-int nVoID = 1;
 
 void SendVirtualObject(WebAPI* api, std::string src) {
 	
@@ -571,7 +747,7 @@ void ReceiveData(SOCKET sock) {
 			if (keyword == "ReferenceFrame") {
 				//if (mapImageSendTimes.Count(id)) {
 				//	auto t_start = mapImageSendTimes.Get(id);
-				//	
+				//	 
 				//	//std::cout << "receive image = " <<id<<", " << du_down << std::endl;
 				//	std::stringstream ss;
 				//	ss << src << "," << keyword << ",latency," << id << "," << "0" << "," << res.size() << "," << du_latency << std::endl;
@@ -592,20 +768,6 @@ void ReceiveData(SOCKET sock) {
 				//}
 			}
 
-			//std::cout << "receive data = " << keyword << " " << res.size() << std::endl;
-			//if (keyword == "WiseUITest") {
-			//	cv::Mat temp = cv::Mat(res.size() / 4, 1, CV_32FC1, (void*)res.data());
-			//	cv::Mat R = cv::Mat(3, 3, CV_32FC1, (void*)res.data());
-			//	cv::Mat t = cv::Mat(3, 1, CV_32FC1, (void*)(res.data() + 36));
-			//	//temp.rowRange(9, 12).copyTo(t);
-			//	float tt = temp.at<float>(12);
-			//	//std::cout << temp.size() << std::endl;
-			//	//std::cout << R << t.t() <<tt<< std::endl;
-			//	vecR.push_back(R.clone());
-			//	vecT.push_back(t.clone());
-			//	nTotal += tt * 1000.0;
-			//	nSize++;
-			//}
 			nReID = id;
 
 			if (id == nLastID)
@@ -700,6 +862,20 @@ void parsing(char* argv[], int& index) {
 	else if (keyword == "--depth") {
 		bCaptureDepth = true;
 	}
+	else if (keyword == "--grid") {
+		bGridCommu = true;
+		//std::cout << "grid test = " << std::endl;
+	}
+	else if (keyword == "--pgba") {
+		bPlaneGBA = true;
+	}
+	else if (keyword == "--vo") {
+		bPlay = true;
+	}
+	else if (keyword == "--rgb_file")
+	{
+		rgbfile = argv[index++];
+	}
 }
 
 void parser(int argc, char* argv[], int index) {
@@ -710,6 +886,104 @@ void parser(int argc, char* argv[], int index) {
 }
 
 int main(int argc, char* argv[]) {
+	
+	//평면 테스트
+	if(false)
+	{
+		long long total1 = 0.0;
+		long long total2 = 0.0;
+		long long total3 = 0.0;
+		for (int aa = 0; aa < 100; aa++) {
+			cv::Mat R = cv::Mat::eye(3, 3, CV_32FC1);
+			cv::Mat t = cv::Mat::ones(3, 1, CV_32FC1);
+			cv::Mat K = cv::Mat::eye(3, 3, CV_32FC1);
+			K.at<float>(0, 0) = 480;
+			K.at<float>(1, 1) = 480;
+			K.at<float>(0, 2) = 320;
+			K.at<float>(1, 2) = 240;
+			cv::Mat Kinv = K.inv();
+			cv::Mat P = cv::Mat::eye(3, 4, CV_32FC1);
+			P.at<float>(0, 3) = 2;
+			P.at<float>(1, 3) = 3;
+			P.at<float>(2, 3) = 4;
+
+			cv::Mat O = cv::Mat::ones(3, 1, CV_32FC1);
+
+			cv::Mat n = cv::Mat::zeros(3, 1, CV_32FC1);
+			n.at<float>(1) = -1;
+			float p = 3.0;
+
+			int inc = 1;
+
+			cv::Mat A = R * Kinv;
+			cv::Mat T = cv::Mat::eye(4, 4, CV_32FC1);
+			cv::Mat Kinv2 = cv::Mat::eye(4, 4, CV_32FC1);
+			Kinv2.at<float>(3, 3) = 0.0;
+			A = T * Kinv2;
+
+			int idx = 0;
+			cv::Mat Temp = cv::Mat::ones(4, 640 * 480, CV_32FC1);
+			std::chrono::high_resolution_clock::time_point t5 = std::chrono::high_resolution_clock::now();
+			for (int x = 0; x < 640; x += inc) {
+				for (int y = 0; y < 480; y += inc) {
+					cv::Mat X = (cv::Mat_<float>(4, 1) << x, y, 1, 1);
+					X.copyTo(Temp.col(idx));
+					idx++;
+				}
+			}
+			cv::Mat B = A * Temp;
+			std::chrono::high_resolution_clock::time_point t6 = std::chrono::high_resolution_clock::now();
+
+
+			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+			idx = 0;
+			for (int x = 0; x < 640; x += inc) {
+				for (int y = 0; y < 480; y += inc) {
+					//cv::Mat X = (cv::Mat_<float>(4, 1) << x, y, 1, 1);
+					//cv::Mat dir =  (A * X);
+					//dir = dir.rowRange(0, 3);
+					cv::Mat dir = B.col(idx++).rowRange(0, 3);
+					for (int i = 0; i < 3; i++) {
+						float a1 = n.dot(dir) + p;
+						float a2 = n.dot(O);
+						float depth = a1 / a2;
+					}
+
+					//std::cout <<"ㅁ=" << n.dot(dir) + p << std::endl;
+					//std::cout <<"ㅠ=" << n.dot(O) << std::endl;
+					//float depth = (n.dot(dir) + p) / (n.dot(0));
+				}
+			}
+
+			std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+
+			std::chrono::high_resolution_clock::time_point t3 = std::chrono::high_resolution_clock::now();
+			idx = 0;
+			for (int x = 0; x < 640; x += inc) {
+				for (int y = 0; y < 480; y += inc) {
+					/*cv::Mat X = (cv::Mat_<float>(4, 1) << x, y,1, 1);
+					cv::Mat dir = (A * X);
+					dir = dir.rowRange(0, 3);*/
+					cv::Mat dir = B.col(idx++).rowRange(0, 3);
+					for (int i = 0; i < 3; i++) {
+						float depth = (O.at<float>(1) + p) / dir.at<float>(1);
+					}
+				}
+			}
+			std::chrono::high_resolution_clock::time_point t4 = std::chrono::high_resolution_clock::now();
+
+			auto d1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+			auto d2 = std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count();
+			auto d3 = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5).count();
+			std::cout <<aa<< " = test = " << d1 << " " << d2 << " " << d3 << std::endl;
+			total1 += d1;
+			total2 += d2;
+			total3 += d3;
+		}
+		std::cout << " test = " << ((double)total1) / 100 << " " << ((double)total2) / 100 << " " << ((double)total3) / 100 << std::endl;
+	}
+	
+	
 	if(false)
 	{
 		cv::VideoCapture cap2("./aaa.mp4"); 
@@ -765,10 +1039,10 @@ int main(int argc, char* argv[]) {
 	std::string paramPath = argv[3];
 
 	std::string dir = argv[4];//"E:/SLAM_DATASET/TUM/rgbd_dataset_freiburg2_desk_with_person/";
-	LoadDataset* dataset = (LoadDataset*)new TumDataset(dir);
-
+	
 	WebAPI::ip = ip;
 	WebAPI::port = port;
+	WebAPI API(ip, port);
 
 	int fps = 30;
 	double tframe = ((double)1.0) / fps;
@@ -779,6 +1053,7 @@ int main(int argc, char* argv[]) {
 	//슬램 실행
 	pDetector = new EdgeDeviceSLAM::ORBDetector(nFeatures, fScaleFactor, nLevels);
 	pCamera = new EdgeDeviceSLAM::Camera(w, h, fx, fy, cx, cy, d1, d2, d3, d4);
+	Kinv = pCamera->Kinv.clone();
 
 	EdgeDeviceSLAM::Tracker::Detector = pDetector;
 	EdgeDeviceSLAM::SearchPoints::Detector = pDetector;
@@ -790,12 +1065,11 @@ int main(int argc, char* argv[]) {
 	pMap = new EdgeDeviceSLAM::Map();
 
 	EdgeDeviceSLAM::RefFrame::nId = 0;
-	pCameraPose = new EdgeDeviceSLAM::CameraPose();
+	pCameraPose = new EdgeDeviceSLAM::CameraPose();  
 	pMotionModel = new EdgeDeviceSLAM::MotionModel();
 
 	pTracker->mTrackState = EdgeDeviceSLAM::TrackingState::NotEstimated;
-
-	WebAPI API(ip, port);
+	
 	int nTimeoutValue = INT_MAX;
 	int aaa = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&nTimeoutValue, sizeof(nTimeoutValue));
 	serveraddr.sin_family = AF_INET;
@@ -811,7 +1085,7 @@ int main(int argc, char* argv[]) {
 		//Image, SimImage
 		datakeyword = argv[idxArgv++];
 		//사용자 이름
-		std::string src = argv[idxArgv++]; 
+		src = argv[idxArgv++]; 
 		//맵 이름
 		std::string mapname = argv[idxArgv++];
 		//압축 퀄리티
@@ -821,19 +1095,7 @@ int main(int argc, char* argv[]) {
 		
 		//여기서부터 파싱 시작
 		parser(argc, argv, idxArgv);
-		//레이턴시 파일 저장
-		//std::string latency_path = argv[idxArgv++];
-		////포즈 정보 기록
-		//traj_path = argv[idxArgv++];
-		////데이터 타입
-		////매핑
-		//bMapping = atoi(argv[idxArgv++]) ? true : false;
-		////트래킹
-		//bTracking = atoi(argv[idxArgv++]) ? true : false;
-		////로컬 맵 통신
-		//bSyncLocalMap = atoi(argv[idxArgv++]) ? true : false;
-		////가상 객체 통신
-		//bVOTest = atoi(argv[idxArgv++]) ? true : false;
+		LoadDataset* dataset = (LoadDataset*)new TumDataset(dir, rgbfile);
 
 		std::vector<int> tempParam(2);
 		tempParam[0] = cv::IMWRITE_JPEG_QUALITY;
@@ -896,7 +1158,9 @@ int main(int argc, char* argv[]) {
 		//매핑
 		temp1.at<uchar>(nbFlagIdx) = bMapping ? 1 : 0;
 		temp1.at<uchar>(nbFlagIdx + 1) = bTracking ? 1 : 0;
+		temp1.at<uchar>(nbFlagIdx + 4) = bPlaneGBA ? 1 : 0;
 		temp1.at<uchar>(nbFlagIdx + 5) = bSyncLocalMap ? 1 : 0;
+		temp1.at<uchar>(nbFlagIdx + 7) = bGridCommu ? 1 : 0;
 		temp1.at<uchar>(nbFlagIdx + 8) = bVOTest ? 1 : 0;
 		std::string strtemp = src + ","+mapname;
 		cv::Mat temp3(strtemp.length(), 1, CV_8UC1, (void*)strtemp.c_str());
@@ -908,7 +1172,7 @@ int main(int argc, char* argv[]) {
 		//이미지 전송
 		ThreadPool::ThreadPool* POOL = new ThreadPool::ThreadPool(3);
 		POOL->EnqueueJob(ReceiveData, sock);
-
+		POOL->EnqueueJob(Visualize);
 		//처음 시작 시간 설정
 		//time_initialization = std::chrono::high_resolution_clock::now();
 
@@ -918,6 +1182,16 @@ int main(int argc, char* argv[]) {
 			cv::Mat img;
 			cv::Mat depth;
 			bool bimg = dataset->GrabImage(img, ts_image);
+
+			if (bPlay && bimg) {
+				ts_last = ts_image;
+				img_last = img.clone();
+			}
+			if (bPlay && !bimg) {
+				bimg = true;
+				img = img_last.clone();
+				ts_image = ts_last;
+			}
 
 			if (bimg)
 			{
@@ -934,7 +1208,11 @@ int main(int argc, char* argv[]) {
 					POOL->EnqueueJob(SendImageData, &API, img, src, datakeyword, fid, ".jpg", tempParam, ts_image);
 				}
 				//vecTSs.push_back(tts);
-				cv::imshow("image", img);
+				//cv::imshow(strWindowName, img);
+				{
+					std::unique_lock<std::mutex> lock(MutexDisplay);
+					MatImage = img.clone();
+				}
 			}else{
 				std::cout<< std::fixed << std::cout.precision(9) << " track = " << ts_image << std::endl;
 			}
@@ -942,15 +1220,14 @@ int main(int argc, char* argv[]) {
 			if (bCaptureDepth) {
 				//capture depth
 				bool bdepth = dataset->GrabDepth(depth, ts_depth);
-				if (bdepth) {
+				if (bdepth && fid % nskip == 0) {
 					//std::cout << "depth type = " << depth.type() << " " << CV_16SC1 << " " << CV_16UC1 <<" "<<CV_16SC2 <<" "<<CV_16UC2 << std::endl;
 					//send
 					POOL->EnqueueJob(SendImageData, &API, depth, src, "Depth", fid, ".png", depthParam, ts_depth);
-					cv::imshow("depth", depth);
+					//cv::imshow("depth", depth);
 				}
 				
 			}
-
 
 			if (!bimg) {
 				nLastID = nSendID;
@@ -965,7 +1242,7 @@ int main(int argc, char* argv[]) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 				//std::cout << "delay = " << delay << std::endl;
 			}
-			cv::waitKey(1);
+			//cv::waitKey(1);
 		}
 
 		std::cout << "done " << std::endl;
@@ -978,657 +1255,8 @@ int main(int argc, char* argv[]) {
 
 			SaveLatency();
 			SaveTrajectory();
-			/*{
-				std::ofstream file;
-				file.open("../res/initialization.csv", std::ios::app);
-				std::stringstream ss;
-				ss << src << "," << mfInitTime<<std::endl;
-				file.write(ss.str().c_str(), ss.str().size());
-				file.close();
-			}*/
+			
 		}
 	}
-	return 0;
-
-
-	/// 시뮬레이터를 여기서 설정하던 것.
-	//매퍼 설정
-	//퀄리티
-	//매핑
-	//베이스 로컬 맵
-	{
-		int idxArgv = 6;
-		int baseQuality = atoi(argv[idxArgv++]);
-		bool baseMapping = atoi(argv[idxArgv++]) ? true : false;
-		bool baseSyncLocalMap = atoi(argv[idxArgv++]) ? true : false;
-		int Nclient = atoi(argv[idxArgv++]);
-		int  clientQualtiy = atoi(argv[idxArgv++]);
-
-		std::cout << baseQuality << " " << baseMapping << " " << baseSyncLocalMap << " " << Nclient << " " << clientQualtiy << std::endl;
-
-		//클라이언트 개수
-
-		std::string src = "eCARSimulator";
-		std::vector<std::string> vecSims;
-		std::vector<bool> vecMappings, vecBoolBases;
-
-		std::vector<std::vector<int>> params;
-
-		//baseline test
-		{
-			std::vector<int> tempParam(2);
-			tempParam[0] = cv::IMWRITE_JPEG_QUALITY;
-			tempParam[1] = baseQuality;//default(95) 0-100
-
-			std::stringstream ss;
-			ss << src << "_" << 0;
-			vecSims.push_back(ss.str());
-			params.push_back(tempParam);
-			vecMappings.push_back(baseMapping);
-			vecBoolBases.push_back(baseSyncLocalMap);
-		}
-		{
-			for (int i = 0; i < Nclient; i++) {
-				std::stringstream ss;
-				ss << src << "_" << i + 1;
-				vecSims.push_back(ss.str());
-			}
-
-			for (int i = 0; i < Nclient; i++) {
-				std::vector<int> tempParam(2);
-				tempParam[0] = cv::IMWRITE_JPEG_QUALITY;
-				tempParam[1] = clientQualtiy;//default(95) 0-100
-				params.push_back(tempParam);
-			}
-
-			for (int i = 0; i < Nclient; i++)
-				vecMappings.push_back(false);
-
-			for (int i = 0; i < Nclient; i++)
-				vecBoolBases.push_back(false);
-		}
-
-		bool bTracking = true;
-		int nSkip = 3;
-		int fid = 0;
-
-		//for (int s = 0; s < vecSims.size(); s++) {
-		//	for (int i = 0, iend = sendKeywords.size(); i < iend; i++) {
-		//		std::stringstream ss;
-		//		ss << "{\"src\":\"" << vecSims[s] << "\"," << "\"keyword\":\"" << sendKeywords[i] << "\",\"type1\":\"server\",\"type2\":\"" << pairKeywords[i] << "\"" << ",\"capacity\":" << 300 << "}"; //test\"}";
-		//		auto res = API.Send("/Connect", ss.str());
-		//	}
-		//}
-
-		bool bInit = false;
-		if (!bInit) {
-
-			{
-				int nInt = 20;
-				int nByte = 10;
-
-				for (int i = 0; i < vecSims.size(); i++) {
-					cv::Mat temp1 = cv::Mat::zeros(nInt * 4 + nByte, 1, CV_8UC1);
-					cv::Mat temp2 = (cv::Mat_<float>(14, 1) << w, h, fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0, params[i][1], nSkip, 10);
-					std::memcpy(temp1.data, temp2.data, 56);
-
-					int nbFlagIdx = nInt * 4;
-					//매핑
-					temp1.at<uchar>(nbFlagIdx) = vecMappings[i] ? 1 : 0;
-					//트래킹
-					temp1.at<uchar>(nbFlagIdx + 1) = bTracking ? 1 : 0;
-					temp1.at<uchar>(nbFlagIdx + 5) = vecBoolBases[i] ? 1 : 0;
-					std::string strtemp = vecSims[i] + ",WiseUIMAP";
-					cv::Mat temp3(strtemp.length(), 1, CV_8UC1, (void*)strtemp.c_str());
-
-					temp1.push_back(temp3);
-					std::stringstream ss;
-					ss << "/Store?keyword=SimDeviceConnect&id=" << fid << "&src=" << vecSims[i];// << "&type2=" << user->userName;
-					auto res = API.Send(ss.str(), temp1.data, temp1.rows);
-				}
-			}
-			bInit = true;
-		}
-
-		////키우더ㅡ 전송
-		//나중에 커넥트도 추가해야 함
-
-
-
-		ThreadPool::ThreadPool* POOL = new ThreadPool::ThreadPool(11);
-		while (true) {
-			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-			double tts;
-			cv::Mat img;
-			cv::Mat depth;
-			bool bimg = dataset->GrabImage(img, tts);
-			bool bdepth = dataset->GrabDepth(depth);
-
-			if (bimg)
-			{
-				++fid;
-				if (fid % nSkip != 0) {
-					continue;
-				}
-				for (int i = 0; i < vecSims.size(); i++) {
-					//POOL->EnqueueJob(SendImageData, &API, img, vecSims[i], fid, params[i],tts);
-				}
-
-				//vecTSs.push_back(tts);
-				cv::imshow("image", img);
-			}
-
-			if (!bimg) {
-				nLastID = nSendID;
-				break;
-			}
-
-			std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-			double ttrack = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count();
-			if (ttrack < tframe) {
-				auto diff = (tframe - ttrack) * 1e3;
-				long long delay = (long long)diff;
-				std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-				//std::cout << "delay = " << delay << std::endl;
-			}
-			cv::waitKey(1);
-		}
-
-		std::cout << "done " << std::endl;
-		//다 끝나면
-		for (int i = 0; i < vecSims.size(); i++)
-		{
-			std::stringstream ss;
-			cv::Mat temp = cv::Mat::zeros(1000, 1, CV_32FC1);
-			ss << "/Store?keyword=SimDeviceDisconnect&id=" << fid << "&src=" << vecSims[i];// << "&type2=" << user->userName;
-			auto res = API.Send(ss.str(), temp.data, temp.rows);
-		}
-
-	}
-	
-
-	return 0;
-
-
-	{
-		std::vector<int> param;
-
-		std::string dir = "E:/SLAM_DATASET/Hololens2/oxrst_room1_r2/pinhole_projection/";
-		//Hololens2Dataset dataset(dir);
-		LoadDataset* dataset = (LoadDataset*)new Hololens2Dataset(dir);
-
-
-		////키우더ㅡ 전송
-		//나중에 커넥트도 추가해야 함
-		WebAPI API("143.248.6.143", 35005);
-		std::vector<std::string> sendKeywords;
-		std::vector<std::string> pairKeywords;
-
-		sendKeywords.push_back("DeviceConnect");			pairKeywords.push_back("NONE");
-		sendKeywords.push_back("OXR::POSE");			pairKeywords.push_back("NONE");
-		sendKeywords.push_back("OXR::IMAGE");			pairKeywords.push_back("NONE");
-
-		for (int i = 0, iend = sendKeywords.size(); i < iend; i++) {
-
-			std::stringstream ss;
-			ss << "{\"src\":\"" << "SLAMServer" << "\"," << "\"keyword\":\"" << sendKeywords[i] << "\",\"type1\":\"server\",\"type2\":\"" << pairKeywords[i] << "\"" << ",\"capacity\":" << 300 << "}"; //test\"}";
-			auto res = API.Send("/Connect", ss.str());
-		}
-
-		cv::Mat F = cv::Mat::eye(4, 4, CV_32FC1);
-		F.at<float>(1, 1) = -1;
-		F.at<float>(2, 2) = -1;
-
-		int nSkip = 4;
-		int id = 0;
-		bool bInit = false;
-
-		std::string src = "PC";
-		bool bMapping = true;
-		bool bTracking = false;
-
-		while (true) {
-			cv::Mat img;
-			cv::Mat depth;
-			cv::Mat T;
-			bool bimg = dataset->GrabImage(img, T);
-
-			T = F * T * F;
-
-			cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
-			cv::Mat t = T.rowRange(0, 3).col(3);
-			R = R.t();
-			t = -R * t;
-			R.copyTo(T.rowRange(0, 3).colRange(0, 3));
-			t.copyTo(T.rowRange(0, 3).col(3));
-
-			bool bdepth = dataset->GrabDepth(depth);
-			if (bdepth) {
-				cv::imshow("depth", depth);
-			}
-			if (bimg) {
-
-				cv::Mat K = dataset->GetCameraParam();
-				float fx = K.at<float>(0, 0);
-				float fy = K.at<float>(1, 1);
-				float cx = K.at<float>(0, 2);
-				float cy = K.at<float>(1, 2);
-
-				if (!bInit) {
-
-					{
-						cv::Mat temp1 = cv::Mat::zeros(62, 1, CV_8UC1);
-						cv::Mat temp2 = (cv::Mat_<float>(13, 1) << dataset->width, dataset->height, fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0, 100, nSkip);
-						std::memcpy(temp1.data, temp2.data, 52);
-						//매핑
-						temp1.at<uchar>(52) = bMapping ? 1 : 0;
-						//트래킹
-						temp1.at<uchar>(53) = bTracking ? 1 : 0;
-						std::string strtemp = src + ",OXRMAP";
-						cv::Mat temp3(strtemp.length(), 1, CV_8UC1, (void*)strtemp.c_str());
-
-						temp1.push_back(temp3);
-						std::stringstream ss;
-						ss << "/Store?keyword=DeviceConnect&id=" << id << "&src=" << src;// << "&type2=" << user->userName;
-						auto res = API.Send(ss.str(), temp1.data, temp1.rows);
-					}
-
-					bInit = true;
-				}
-
-				++id;
-				if (id % nSkip != 0) {
-					continue;
-				}
-
-				/*auto mpCamera = new EdgeSLAM::Camera(dataset->width, dataset->height,fx, fy, cx, cy, 0.0,0.0,0.0,0.0,0.0);
-				auto mpFrame = new EdgeSLAM::Frame(img, mpCamera, 0, 0);
-				mpFrame->SetPose(T);
-
-				for (int i = 0; i < mpFrame->mvKeys.size(); i++)
-					cv::circle(img, mpFrame->mvKeys[i].pt, 3, -1);*/
-
-				std::stringstream ss;
-				ss << "/Store?keyword=OXR::POSE&id=" << ++id << "&src=" << src;// << "&type2=" << user->userName;
-				auto res = API.Send(ss.str(), T.data, sizeof(float) * 16);
-
-				{
-					std::vector<uchar> buffer;
-					cv::imencode(".jpg", img, buffer, param);
-					cv::Mat encoded(buffer);
-
-					std::stringstream ss;
-					ss << "/Store?keyword=OXR::IMAGE&id=" << id << "&src=" << src;// << "&type2=" << user->userName;
-					auto res = API.Send(ss.str(), encoded.data, encoded.rows);
-				}
-
-				cv::imshow("image", img);
-				//std::cout << T << std::endl;
-				cv::waitKey(0);
-			}
-			else {
-				std::cout << "fail load image" << std::endl;
-			}
-
-		}
-
-		return 0;
-		{
-			std::stringstream ss;
-			ss << "E:/SLAM_DATASET/ICL_NUIM/living_room_traj2_frei_png/rgb.txt";
-			std::ifstream ifs;
-			ifs.open(ss.str());
-
-			std::stringstream ss2;
-			ss2 << "E:/SLAM_DATASET/ICL_NUIM/living_room_traj2_frei_png/rgb2.txt";
-			std::ofstream of;
-			of.open(ss2.str());
-
-			char line[1000] = { 0, };
-			ifs.getline(line, 1000);
-			of << line << std::endl;
-			ifs.getline(line, 1000);
-			of << line << std::endl;
-			ifs.getline(line, 1000);
-			of << line << std::endl;
-
-			int idx = 0;
-			//1부터 할지 0부터 할지
-			while (!ifs.eof()) {
-				std::string a, b;
-				std::stringstream ss;
-				ifs >> a >> b;
-
-				std::cout << idx << " " << b << std::endl;
-				of << idx << " " << b << std::endl;
-				idx++;
-				//ss << path << b;
-			}
-			of.close();
-
-			return 0;
-		}
-
-
-
-		std::string path = "E:/SLAM_DATASET/TUM/rgbd_dataset_freiburg3_long_office_household/";
-		std::stringstream ss;
-		ss << "E:/SLAM_DATASET/TUM/rgbd_dataset_freiburg3_long_office_household/rgb.txt";
-		std::cout << ss.str() << std::endl;
-
-		std::ifstream ifs;
-		ifs.open(ss.str());
-
-		char line[1000] = { 0, };
-		ifs.getline(line, 1000);
-		ifs.getline(line, 1000);
-		ifs.getline(line, 1000);
-
-
-
-		float total = 640 * 480;
-
-		cv::Ptr<cv::Feature2D> ORB = cv::ORB::create(1000);
-		cv::Ptr<cv::Feature2D> SIFT = cv::SIFT::create(1000);
-		cv::Ptr<cv::DescriptorMatcher> matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
-
-		//디스크립터차이
-		std::map<int, std::vector<float>> mapORBDescriptorDistance, mapSIFTDescriptorDistance;
-		////압축률
-		std::map<int, std::vector<double>> mapCompressionRatio, mapCompressionSize, mapPixelDistance;
-		////인코딩 디코딩 시간
-		std::map<int, std::vector<double>> mapEncodingTime, mapDecodingTime;
-
-		////SuperPoint
-		//{
-		//	WebAPI* mpAPI = new WebAPI("143.248.6.143", 35005);
-		//	std::vector<std::string> sendKeywords;
-		//	std::vector<std::string> pairKeywords;
-		//	sendKeywords.push_back("SuperPointTest");		pairKeywords.push_back("SuperPointTest2");
-
-		//	for (int i = 0, iend = sendKeywords.size(); i < iend; i++) {
-		//		std::stringstream ss;
-		//		ss << "{\"keyword\":\"" << sendKeywords[i] << "\",\"type1\":\"Server\",\"type2\":\"" << pairKeywords[i] << "\"}"; //test\"}";
-		//		std::cout << ss.str() << std::endl;
-		//		mpAPI->Send("/Connect", ss.str());
-		//		std::cout << "asdfasdf" << std::endl;
-		//	}
-		//	delete mpAPI;
-		//}
-
-		{
-			std::map<int, std::vector<double>> mapEncodingTime, mapDecodingTime, mapCompressionSize;
-			std::vector<int> param = std::vector<int>(2);
-			param[0] = cv::IMWRITE_PNG_COMPRESSION;
-			////PNG
-			int nTotal = 0;
-			while (!ifs.eof()) {
-				if (nTotal == 2500)
-					break;
-				nTotal++;
-
-				std::string a, b;
-				std::stringstream ss;
-				ifs >> a >> b;
-				ss << path << b;
-				std::cout << nTotal << " " << ss.str() << std::endl;
-				cv::Mat img = cv::imread(ss.str());
-				if (img.empty())
-					continue;
-
-				for (int i = 1; i < 10; i++) {
-					param[1] = i;//0 - 9
-					std::vector<uchar> buffer;
-
-					std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-					cv::imencode(".png", img, buffer, param);
-					std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-					auto du_test1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-					double t_test1 = du_test1 / 1000.0;
-					mapEncodingTime[i].push_back(t_test1);
-
-					//decoding
-					t1 = std::chrono::high_resolution_clock::now();
-					cv::Mat jpeg = cv::imdecode(cv::Mat(buffer), cv::IMREAD_COLOR);
-					t2 = std::chrono::high_resolution_clock::now();
-					du_test1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-					t_test1 = du_test1 / 1000.0;
-					mapDecodingTime[i].push_back(t_test1);
-
-					//압축 크기, 압축률
-					mapCompressionSize[i].push_back(buffer.size());
-				}
-
-
-			}
-			return 0;
-			std::stringstream ssfile;
-			ssfile << "../bin/PNG_EXPERIMENT.txt";
-			std::ofstream f;
-			f.open(ssfile.str().c_str());
-			f << "Quality AVG Ratio Encoding Decoding" << std::endl;
-			for (int i = 1; i < 10; i++) {
-
-				//압축률
-				cv::Mat csize(mapCompressionSize[i]);
-				double avgCompressed = (640.0 * 480.0 * 3 - cv::mean(csize).val[0]) / (640.0 * 480 * 3) * 100.0;
-
-				////인코딩 시간
-				cv::Mat tencode(mapEncodingTime[i]);
-				double ate = cv::mean(tencode).val[0];
-				////디코딩 시간
-				cv::Mat tdecode(mapDecodingTime[i]);
-				double atd = cv::mean(tdecode).val[0];
-				f << i << " " << cv::mean(csize).val[0] << " " << avgCompressed << " " << ate << " " << atd << std::endl;
-				/*f << "Quality = " << i << std::endl;
-				f << "Average compression size = " << cv::mean(csize).val[0] << std::endl;
-				f << "압축률 = " << avgCompressed << " %" << std::endl;
-				f << "Encoding Time = " << ate << " ms" << std::endl << "Decoding Time =" << atd << " ms" << std::endl;
-				f << std::endl;*/
-			}
-			f.close();
-			return 0;
-		}
-
-		int nTotal = 0;
-		while (!ifs.eof()) {
-			if (nTotal == 2500)
-				break;
-			nTotal++;
-			/*ifs.getline(line, 1000);
-			std::cout <<"a "<< line << std::endl;*/
-			std::string a, b;
-			std::stringstream ss;
-			ifs >> a >> b;
-			ss << path << b;
-			std::cout << nTotal << " " << ss.str() << std::endl;
-			cv::Mat img = cv::imread(ss.str());
-			if (img.empty())
-				continue;
-
-			//{
-			//	std::vector<uchar> buffer;
-			//	cv::imencode(".png", img, buffer, param);
-			//	WebAPI* mpAPI = new WebAPI("143.248.6.143", 35005);
-			//	std::stringstream ss;
-			//	ss << "/Store?keyword=SuperPointTest&id=" << nTotal << "&src=TestServer";// << "&type2=" << user->userName;
-			//	auto res = mpAPI->Send(ss.str(), cv::Mat(buffer).data, buffer.size());
-			//	delete mpAPI;
-			//	continue;
-			//}
-
-			std::vector<cv::KeyPoint> vecORBKPs, vecSIFTKPs;
-			cv::Mat oriGray, oriORBDesc, oriSIFTDesc;
-			cv::cvtColor(img, oriGray, cv::COLOR_BGR2GRAY);
-			ORB->detectAndCompute(oriGray, cv::Mat(), vecORBKPs, oriORBDesc);
-			SIFT->detectAndCompute(oriGray, cv::Mat(), vecSIFTKPs, oriSIFTDesc);
-
-			for (int i = 100; i >= 0; i -= 10) {
-				//encoding
-				if (i == 0)
-					i = 1;
-				param[1] = i;
-				std::vector<uchar> buffer;
-				std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-				cv::imencode(".jpg", img, buffer, param);
-				std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-				auto du_test1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-				double t_test1 = du_test1 / 1000.0;
-				mapEncodingTime[i].push_back(t_test1);
-
-				//decoding
-				t1 = std::chrono::high_resolution_clock::now();
-				cv::Mat jpeg = cv::imdecode(cv::Mat(buffer), cv::IMREAD_COLOR);
-				t2 = std::chrono::high_resolution_clock::now();
-				du_test1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-				t_test1 = du_test1 / 1000.0;
-				mapDecodingTime[i].push_back(t_test1);
-
-				//압축 크기, 압축률
-				mapCompressionSize[i].push_back(buffer.size());
-
-				//픽셀차이
-				double diff = sum(abs(img - jpeg)).val[0];
-				mapPixelDistance[i].push_back(diff);
-
-				//디스크립터 계산
-				cv::Mat jpegORBDesc, jpegSIFTDesc;
-				cv::Mat jpegGray;
-				cv::cvtColor(jpeg, jpegGray, cv::COLOR_BGR2GRAY);
-				ORB->compute(jpegGray, vecORBKPs, jpegORBDesc);
-				for (int j = 0, jend = jpegORBDesc.rows; j < jend; j++) {
-					cv::Mat row1 = oriORBDesc.row(j);
-					cv::Mat row2 = jpegORBDesc.row(j);
-					//sumDesc += CalculateDescDistance(row1, row2);
-					mapORBDescriptorDistance[i].push_back(CalculateDescDistance(row1, row2));
-				}
-				SIFT->compute(jpegGray, vecSIFTKPs, jpegSIFTDesc);
-				for (int j = 0, jend = jpegSIFTDesc.rows; j < jend; j++) {
-					cv::Mat row1 = oriSIFTDesc.row(j);
-					cv::Mat row2 = jpegSIFTDesc.row(j);
-					//sumDesc += CalculateDescDistance(row1, row2);
-					mapSIFTDescriptorDistance[i].push_back(CalculateDescDistance(row1, row2));
-				}
-			}
-
-		}
-
-		std::stringstream ssfile;
-		ssfile << "../bin/JpegExperiments.txt";
-		std::ofstream f;
-		f.open(ssfile.str().c_str());
-
-		for (int i = 100; i >= 0; i -= 10) {
-
-			if (i == 0)
-				i = 1;
-
-			//압축률
-			cv::Mat csize(mapCompressionSize[i]);
-			double avgCompressed = (640.0 * 480.0 * 3 - cv::mean(csize).val[0]) / (640.0 * 480 * 3) * 100.0;
-			////픽셀 디스턴스
-			cv::Mat pixelDist(mapPixelDistance[i]);
-			double avgDiff = cv::mean(pixelDist).val[0] / (640.0 * 480 * 3);
-			////인코딩 시간
-			cv::Mat tencode(mapEncodingTime[i]);
-			double ate = cv::mean(tencode).val[0];
-			////디코딩 시간
-			cv::Mat tdecode(mapDecodingTime[i]);
-			double atd = cv::mean(tdecode).val[0];
-			////디스크립터시간
-			cv::Mat descORBDist(mapORBDescriptorDistance[i]);
-			float avgORBDescDist = cv::mean(descORBDist).val[0];
-			cv::Mat descSIFTDist(mapSIFTDescriptorDistance[i]);
-			float avgSIFTDescDist = cv::mean(descSIFTDist).val[0];
-
-			f << "Quality = " << i << std::endl;
-			f << "Average compression size = " << cv::mean(csize).val[0] << std::endl;
-			f << "압축률 = " << avgCompressed << " %" << std::endl;
-			f << "Pixel Distance = " << avgDiff << std::endl;
-			f << "Descriptor Distance(ORB) = " << avgORBDescDist << std::endl;
-			f << "Descriptor Distance(SIFT) = " << avgSIFTDescDist << std::endl;
-			f << "Descriptor Distance(SuperPoint) = " << std::endl;
-			f << "Encoding Time = " << ate << " ms" << std::endl << "Decoding Time =" << atd << " ms" << std::endl;
-
-			f << std::endl;
-		}
-		f.close();
-
-		////매칭 결과 측정
-		/*std::vector<double> m0, m1, m2, m3, m4, m5;
-		for (int i = 0, iend = d1.size() - 10; i < iend; i++) {
-			int i2 = i + 10;
-			int n0 = 0;
-			int n1 = 0;
-			int n2 = 0;
-			int n3 = 0;
-			int n4 = 0;
-			int n5 = 0;
-
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_ori[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n0++;
-					}
-				}
-			}
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_j1[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n1++;
-					}
-				}
-			}
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_j2[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n2++;
-					}
-				}
-			}
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_j3[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n3++;
-					}
-				}
-			}
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_j4[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n4++;
-					}
-				}
-			}
-			{
-				std::vector<std::vector<cv::DMatch>> matches;
-				matcher->knnMatch(desc_ori[i], desc_p1[i2], matches, 2);
-				for (int j = 0, jend = matches.size(); j < jend; j++) {
-					if (matches[j][0].distance < matches[j][1].distance*0.8) {
-						n5++;
-					}
-				}
-			}
-			m0.push_back(n0);
-			m1.push_back(n1);
-			m2.push_back(n2);
-			m3.push_back(n3);
-			m4.push_back(n4);
-			m5.push_back(n5);
-		}*/
-		////매칭 결과 측정
-	}
-	
-
 	return 0;
 }

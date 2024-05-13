@@ -9,6 +9,8 @@
 #include <iostream>
 #include <sstream>
 
+#include <opencv2/line_descriptor.hpp>
+
 //#include <System.h>
 //#include <Frame.h>
 //#include <User.h>
@@ -39,18 +41,36 @@
 #include <ObjectFrame.h>
 #include <Tracker.h>
 #include <User.h>
+#include <Camera.h>
 #include <SemanticProcessor.h>
 #include <GridProcessor.h>
+#include <DepthProcessor.h>
 #include <DynamicTrackingProcessor.h>
 #include <PlaneEstimator.h>
+//#include <SimpleRecon.h>
+#include <SimpleRecon.hpp>
 #include <ContentProcessor.h>
 #include <MarkerProcessor.h>
 #include <CoordinateIntegration.h>
 #include <PlanarOptimizer.h>
 #include <Node.h>
+#include <GraphNode.h>
 #include <Confidence.h>
 #include <LabelInfo.h>
 #include <ConcurrentMap.h>
+
+////BASE SLAM
+#include <BaseSLAM.h>
+#include <Device.h>
+#include <AbstractMap.h>
+#include <StructMap.h>
+
+//line
+#include <LineProcessor.h>
+#include <LineWorldMap.h>
+#include <LineFrame.h>
+#include <MapLine.h>
+#include <PluckerCoordinate.h>
 
 #include <ThreadPool.h>
 #include <WebAPI.h>
@@ -60,6 +80,18 @@
 //#include <ORBDetector.h>
 
 #include <opencv2/aruco.hpp>
+
+//#include <CovisibilityGraph.h>
+//#include "CovisibilityGraph.cpp"
+#include <MapLine.h>
+#include <SimpleFrame.h>
+#include <StructOptimizer.h>
+#include <StructGraph.h>
+#include <StructType.h>
+#include <StructMapper.h>
+//#include <StructMatcher.cc>
+
+using namespace cv::line_descriptor;
 
 /////CPU 사용량 체크
 static ULARGE_INTEGER lastCPU, lastSysCPU, lastUserCPU;
@@ -765,6 +797,9 @@ void DeviceCoordAlignTest(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, st
 	if (!User)
 		return;
 	User->mnUsed++;
+	
+	std::chrono::high_resolution_clock::time_point t_down_start = std::chrono::high_resolution_clock::now();
+
 	WebAPI API(ip, port);
 	auto res = API.Send(url, "");
 	int n2 = res.size();
@@ -796,7 +831,111 @@ void DeviceCoordAlignTest(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, st
 			m.erase(a);
 		}
 	}
+
+	//gt = server = map1
+	//data = device = map2
+	//s = device->server
+	int Nframe = 30;
+	if (res_inter.size() > Nframe) {
+		cv::Mat T1 = cv::Mat::zeros(0, 3, CV_32FC1);
+		cv::Mat T2 = cv::Mat::zeros(0, 3, CV_32FC1);
+		for (int i = res_inter.size() - 1, iend = res_inter.size() - Nframe; i > iend; i--) {
+		//for (int i = res_inter.size() - 1, iend = 10; i > iend; i--) {
+			int id = res_inter[i];
+			cv::Mat O1 = map1[id].rowRange(0, 3).col(3).t();
+			cv::Mat O2 = map2[id].rowRange(0, 3).col(3).t();
+			T1.push_back(O1);
+			T2.push_back(O2);
+		}
+
+		T1 = T1.t();
+		T2 = T2.t();
+
+		//평균
+		cv::Mat mean1, mean2;
+		cv::Mat temp2 = cv::Mat::ones(1, T1.cols, CV_32FC1);
+		cv::reduce(T1, mean1, 1, cv::REDUCE_AVG, CV_32F);
+		cv::reduce(T2, mean2, 1, cv::REDUCE_AVG, CV_32F);
+		cv::Mat amean1 = mean1 * temp2;
+		cv::Mat amean2 = mean2 * temp2;
+		
+		cv::Mat T1_zero = T1 - amean1;
+		cv::Mat T2_zero = T2 - amean2;
+		
+		cv::Mat W = cv::Mat::zeros(3, 3, CV_32FC1);
+		for (int i = 0; i < T1_zero.cols; i++) {
+			cv::Mat t1 = T1_zero.col(i);
+			cv::Mat t2 = T2_zero.col(i);
+			W += (t2 * t1.t());
+		}
+		
+		cv::Mat w, u, vt;
+		cv::SVD::compute(W.t(), w, u, vt);
+		cv::Mat I = cv::Mat::eye(3,3, w.type());
+		
+		if (cv::determinant(u) * cv::determinant(vt) < 0)
+			I.at<float>(2, 2) = -1;
+		cv::Mat R = u * I * vt;
+		cv::Mat A = R * T2_zero;
+		A = A.reshape(0, 1).t();
+		cv::Mat b = T1_zero.reshape(0,1).t();
+		cv::Mat x;
+		cv::solve(A, b, x, cv::DECOMP_SVD);
+		float s = x.at<float>(0);
+		
+		cv::Mat t = mean1 - s * R * mean2;
+		cv::Mat at = t * temp2;
+		cv::Mat aligned = R * (s * T2) + at;
+		cv::Mat errMat = aligned - T1;
+
+		cv::Mat AA;
+		cv::reduce(errMat.mul(errMat),AA,0,cv::REDUCE_SUM, CV_32F);
+		cv::sqrt(AA, AA);
+		float err = sqrt(AA.dot(AA))/T1.cols;
+		/*float max_err = 0.0;
+		for (int i = 0; i < AA.cols; i++) {
+			float val = AA.at<float>(i);
+			float erra = sqrt(val * val);
+			if (erra > max_err) {
+				max_err = erra;
+			}
+		}*/
+
+		cv::Mat cov, mu;
+		cv::calcCovarMatrix(errMat, cov, mu, cv::COVAR_NORMAL | cv::COVAR_COLS,CV_32F);
+		cv::Mat info = cov.inv();
+		float max_val = 0.0;
+		for (int i = 0; i < errMat.cols; i++) {
+			cv::Mat var = errMat.col(i);
+			float chi2 = var.dot(info * var);
+			if (max_val < chi2)
+				max_val = chi2;
+			if (chi2 > 1) {
+				std::cout << "chi2 test = " << chi2 << std::endl;
+			}
+		}
+
+		//A = R*t2_zero
+		//b = t1_zeros
+		std::chrono::high_resolution_clock::time_point t_down_end = std::chrono::high_resolution_clock::now();
+		auto du_down = std::chrono::duration_cast<std::chrono::milliseconds>(t_down_end - t_down_start).count();
+		//std::cout << "err = " << err <<" "<<max_val << " " << du_down << "::" << s << std::endl;
+
+		User->ScaleFactor = 1.0 / s;
+		{
+			cv::Mat invR = R.t();
+			cv::Mat invT = -invR * t;
+			invR.copyTo(User->Tcoord.rowRange(0, 3).colRange(0, 3));
+			invT.copyTo(User->Tcoord.rowRange(0, 3).col(3));
+			
+			//시각화 테스트
+		}
+
+		User->MapAlignedDeviceTrajectories.Update(id, aligned.col(0));
+	}
 	
+	User->mnUsed--;
+	return;
 	float avg1 = 0.0;
 	float avg2 = 0.0;
 	float avg3 = 0.0;
@@ -828,7 +967,6 @@ void DeviceCoordAlignTest(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, st
 		avg3 /= nTemp;
 		User->ScaleFactor = avg3;
 		std::cout << "intersection = " << res_inter.size() << " " << nTemp << "==" << avg3 << " " << avg2 / avg1 << std::endl;
-	  
 	}
 	
 	User->mnUsed--;
@@ -943,6 +1081,9 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 	User->mnUsed--;
 }
 
+//BaseSLAM
+BaseSLAM::BaseSLAM* BaseSLAMSystem = new BaseSLAM::BaseSLAM();
+
 void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
 	if (!SLAM->CheckUser(src)) {
 		return;
@@ -961,7 +1102,11 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	cv::Mat img = cv::imdecode(temp, cv::IMREAD_COLOR);
 	cv::Mat visImg = img.clone();
 
+	//인코딩 정보 저장
+	User->ImageDatas.Update(id, temp.clone());
+
 	cv::Mat K = User->GetCameraMatrix();
+	cv::Mat Kinv = User->GetCameraInverseMatrix();
 	EdgeSLAM::Frame* frame = new EdgeSLAM::Frame(img, User->mpCamera, id, frame_ts);
 	frame->mnShared++;
 	//auto frame = std::make_shared<EdgeSLAM::Frame>(img, User->mpCamera, id, received_ts);
@@ -980,22 +1125,186 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	bool bTrackSuccess = trackStat == EdgeSLAM::UserState::Success && frame->mvpMapPoints.size() > 0;
 	bool bCommuTest = User->mbCommuTest;
 	int nContentKFs = User->mnContentKFs;
+	bool bMapping = User->mbMapping;
+
+
+	///LINE TRACKING
+	//SemanticSLAM::LineFrame* pLF = nullptr;
+	//if (bTrackSuccess) {
+	//	pLF = new SemanticSLAM::LineFrame(frame, User->mpCamera,frame->mpCamPose);
+	//	SemanticSLAM::LineProcessor::LineDetectonAndCompute(pLF, img);
+	//	if (!SemanticSLAM::LineProcessor::PrevLineFrames.Count(User)) {
+	//		SemanticSLAM::LineProcessor::PrevLineFrames.Update(User, pLF);
+	//	}
+	//	else {
+	//		auto pPrevLF = SemanticSLAM::LineProcessor::PrevLineFrames.Get(User);
+	//		bool mbInitLineMap = SemanticSLAM::LineProcessor::mbInitMap;
+	//		if (mbInitLineMap) {
+	//			std::vector<std::pair<int, int>> matches;
+	//			SemanticSLAM::LineProcessor::LineMatchingWithFrame(pPrevLF, pLF, matches);
+
+	//			std::vector<SemanticSLAM::LineFrame*> vpLocalKFs;
+	//			std::vector<SemanticSLAM::MapLine*> vpLocalMPs;
+	//			SemanticSLAM::LineProcessor::UpdateLocalMap(pLF, vpLocalKFs, vpLocalMPs);
+	//			int Nline = SemanticSLAM::LineProcessor::LineMatchingWithLocalMapLines(pLF, vpLocalMPs);
+	//			//std::cout << "Line Matching = " << Nline << std::endl;
+	//			cv::Mat lsd_outImg = img.clone();
+	//			
+	//			cv::Mat Tcw1 = frame->GetPose();
+	//			cv::Mat Kline = pLF->Kline.clone();
+	//			auto pPlucker = new SemanticSLAM::PluckerCoordinate();
+	//			cv::Mat projMat1 = pPlucker->PlukerProjectionMatrix(Tcw1);
+	//			auto vecMLs = pLF->mvpMapLines.get();
+
+	//			//평면 속하는 라인 찾기
+	//			SemanticSLAM::Plane* Floor = nullptr;
+	//			std::vector<bool> vecPlanarLines(vecMLs.size(),false);
+	//			if (SemanticSLAM::PlaneEstimator::GlobalFloor)
+	//			{
+	//				Floor = SemanticSLAM::PlaneEstimator::GlobalFloor;
+	//				cv::Mat normal = Floor->normal.clone();
+	//				if (normal.rows > 0)
+	//				{
+	//					//std::cout << normal << std::endl;
+	//					for (int i = 0, iend = matches.size(); i < iend; i++) {
+	//						int idx = matches[i].second;
+	//						auto pML = vecMLs[idx];
+	//						if (!pML || pML->isBad()) {
+	//							continue;
+	//						}
+	//						auto d = pML->GetPlucker().rowRange(3, 6);
+	//						bool b = pPlucker->CheckLineOnPlane(normal, d);
+	//						vecPlanarLines[idx] = false;//b;
+	//					}
+	//				}
+	//			}
+	//			cv::Mat en_prev = User->ImageDatas.Get(pPrevLF->mnReferenceID);
+	//			cv::Mat prevImg = cv::imdecode(en_prev, cv::IMREAD_COLOR);
+	//			for (int i = 0, iend = matches.size(); i < iend; i++) {
+
+	//				int idx1 = matches[i].first;
+	//				auto keyline1 = pPrevLF->mvKeyLines[idx1];
+	//				
+	//				int idx2 = matches[i].second;
+	//				auto keyline2 = pLF->mvKeyLines[idx2];
+	//				
+	//				auto pML = vecMLs[idx2];
+	//				//if (!pML || pML->isBad())
+	//				//	continue;
+
+	//				auto s1 = keyline1.getStartPoint();
+	//				auto e1 = keyline1.getEndPoint();
+	//				auto s2 = keyline2.getStartPoint();
+	//				auto e2 = keyline2.getEndPoint();
+
+	//				cv::line(prevImg, s1, e1, cv::Scalar(0, 255, 0), 2);
+	//				cv::line(prevImg, s1, s2, cv::Scalar(0, 255, 255), 1);
+	//				cv::line(prevImg, e1, e2, cv::Scalar(0, 255, 255), 1);
+
+	//				/*if (pML && !pML->isBad()) {
+	//					cv::Mat line = Kline* projMat1* pML->GetPlucker();
+	//					auto m1 = -line.at<float>(0) / line.at<float>(1);
+	//					bool bSlopeOpt1 = abs(m1) > 1.0;
+	//					float val1;
+	//					if (bSlopeOpt1)
+	//						val1 = 480.0;
+	//					else
+	//						val1 = 640.0;
+	//					auto pt11 = pPlucker->CalcLinePoint(0.0, line, bSlopeOpt1);
+	//					auto pt12 = pPlucker->CalcLinePoint(val1, line, bSlopeOpt1);
+	//					cv::line(lsd_outImg, pt11, pt12, cv::Scalar(0, 0, 255), 2);
+	//				}*/
+	//				if(vecPlanarLines[idx2])
+	//					cv::line(lsd_outImg, s2, e2, cv::Scalar(0, 255, 0), 2);
+	//				else
+	//					cv::line(lsd_outImg, s2, e2, cv::Scalar(255, 0, 0), 2);
+	//			}
+	//			for (int i = 0; i < pLF->mvKeyLines.size(); i++) {
+	//				auto pML = pLF->mvpMapLines.get(i);
+	//				if (!pML || pML->isBad() || pLF->mvbOutliers.get(i))
+	//					continue;
+	//				auto keyline2 = pLF->mvKeyLines[i];
+	//				auto s2 = keyline2.getStartPoint();
+	//				auto e2 = keyline2.getEndPoint();
+	//				cv::line(lsd_outImg, s2, e2, cv::Scalar(255, 0, 0), 2);
+	//			}
+	//			{
+	//				std::stringstream ss;
+	//				ss << "../res/images/" << frame->mnFrameID << "_line1.png";
+	//				cv::imwrite(ss.str(), prevImg);
+	//				ss.str("");
+	//				ss << "../res/images/" << frame->mnFrameID << "_line2.png";
+	//				cv::imwrite(ss.str(), lsd_outImg);
+	//			}
+	//			SLAM->VisualizeImage(mapName, lsd_outImg, nVisID + 1);
+	//			SLAM->VisualizeImage(mapName, prevImg, nVisID + 2);
+	//			//delete pPrevLF;
+	//			
+	//		}
+	//		else {
+	//			
+	//			if (bTrackSuccess && !SemanticSLAM::LineProcessor::mbLineInitDoing) {
+	//				//initialization
+	//				SemanticSLAM::LineProcessor::mbLineInitDoing = true;
+	//				std::cout << "Line Initialization Start" << std::endl;
+	//				cv::Mat invK = User->mpCamera->Kinv.clone();
+	//				cv::Mat Kline = User->mpCamera->Kfluker.clone();
+	//				pLF->mfMedianDepth = User->mpRefKF->ComputeSceneMedianDepth(2);
+	//				if (SemanticSLAM::LineProcessor::Initalization(pLF) == EdgeSLAM::MapState::Initialized) {
+	//					SemanticSLAM::LineProcessor::mbInitMap = true;
+	//					std::cout << "Line Initialization Success" << std::endl;
+	//				}
+	//				else {
+	//					std::cout << "Line Initialization Failed" << std::endl;
+	//				}
+	//				SemanticSLAM::LineProcessor::mbLineInitDoing = false;
+	//			}
+	//		}//if
+	//		SemanticSLAM::LineProcessor::PrevLineFrames.Update(User, pLF);
+	//	}
+	//}
+	///LINE TRACKING
 	
+
 	//SemanticSLAM::DynamicTrackingProcessor::ObjectTracking(POOL, SLAM, src, frame, img.clone(), id);
 	/////////////////////로컬 그래프 정보 전송
 	//트래킹 후에 데이터 전송
 	cv::Mat Pcw = frame->GetPose();
 	cv::Mat Rcw = Pcw.rowRange(0, 3).colRange(0, 3);
 	cv::Mat tcw = Pcw.rowRange(0, 3).col(3);
-
+	cv::Mat Tinv = frame->GetPoseInverse();
+	cv::Mat Ow = frame->GetCameraCenter();
 	//전송 수정 테스트
 	//int nQueueKFs = 8;
 	//cv::Mat totaldata = cv::Mat::zeros(2, 1, CV_32FC1); //파싱 아이디, 전체크기는 자기자신 포함. 1 + Nkf + Nmp
 
+	//User->mbNewKF = true;
 	if (User->mbNewKF) {
+		User->mbNewKF = false;
 		Utils::SendReqMessage("RequestObjectDetection", src, id);
 		Utils::SendReqMessage("RequestSegmentation", src, id);
-		User->mbNewKF = false;
+		//Utils::SendReqMessage("RequestDepth", src, id);
+
+		//쓰레드풀로
+		if(SemanticSLAM::LineProcessor::mbInitMap) {
+			/*if (!pLF)
+			{
+				std::cout << "err1" << std::endl;
+			}
+			else {
+				std::cout << pLF->mnId << std::endl;
+				std::cout << pLF->mvKeyLines.size() << std::endl;
+				if (!pLF->mpCamPose)
+					std::cout << "error2" << std::endl;
+				std::cout << pLF->mLineDescriptors.rows << std::endl;
+			}*/
+
+			//LINE MAPPING
+			/*auto pLKF = new SemanticSLAM::LineFrame(pLF, pRefKF->ComputeSceneMedianDepth(2));
+			POOL->EnqueueJob(SemanticSLAM::LineProcessor::LineMapping, SLAM, User, pLKF, id);*/
+			//LINE MAPPING
+		}
+		//SemanticSLAM::LineProcessor::LineMapping(SLAM, User, pLKF, id);
 	}
 
 	if(bTrackSuccess){
@@ -1054,9 +1363,311 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 			if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i])
 				continue;
 			auto pt = frame->mvKeys[i].pt;
-			cv::circle(visImg, pt, 3, cv::Scalar(255, 0, 0), -1);
+			cv::circle(visImg, pt, 3, cv::Scalar(0, 255, 0), 1);
+		}
+		
+		if (pRefKF && planedata.at<float>(0) >= 8.0) {
+			////라인, 평면, 포인트 최적화 중
+			auto pLF = new SemanticSLAM::LineFrame(frame, User->mpCamera, frame->mpCamPose);
+			SemanticSLAM::LineProcessor::LineDetectonAndCompute(pLF, img);
+
+			int Nplane = (int)planedata.at<float>(2);
+			int N = (int)planedata.at<float>(2);
+			cv::Mat tempa = planedata.rowRange(3, planedata.rows);
+			cv::Mat P = tempa.reshape(1, N).colRange(1,5);
+			cv::Mat reconed, vis_recon, depthImg;
+			
+			cv::Mat pmask = img.clone();
+			//std::cout << "StructTest::Strat" << std::endl;
+			StructOptimization::SimpleRecon::SimpleReconstruction(vis_recon, reconed, depthImg, img, User->matXcam, frame->GetPoseInverse().rowRange(0,3), frame->GetCameraCenter(), P);
+			
+			StructOptimization::StructMap* tempMap = (StructOptimization::StructMap*)BaseSLAMSystem->GetMap(User->mapName);
+			auto device = tempMap->GetDevice(src);
+			//임시로 뎁스에 마스크 이미지 넣음.
+			StructOptimization::SimpleFrame* pSF = new StructOptimization::SimpleFrame(id, device, reconed, vis_recon, P);
+			//std::cout << "StructTest::Classify" << std::endl;
+			StructOptimization::SimpleRecon::ClassipyPointAndLine(pSF, reconed, frame, pLF);
+
+			///이 밑부터는 매핑으로
+			//std::cout << "StructTest::Matching" << std::endl;
+			StructOptimization::SimpleRecon::ProjectPointsAndLines(pmask, pSF);
+
+			//StructOptimization::SimpleRecon::ProjectPlane(reconed, pSF, P);
+			//std::cout << "StructTest::Triangulation" << std::endl;
+			//sStructOptimization::SimpleRecon::SimpleTriangulation(tempMap, pSF, depthImg, P);
+			
+			//시각화
+			{
+				auto vecAllPoints = tempMap->GetAllData<StructOptimization::StructPoint>();
+				cv::Mat matPointData;
+				for (int i = 0, iend = vecAllPoints.size(); i < iend; i++) {
+					auto pMP = vecAllPoints[i];
+					if (!pMP || pMP->isBad())
+						continue;
+					StructOptimization::FramePointObservation* pO = pMP;
+					if (pO->Observations() < 2)
+						continue;
+					auto endPt = pMP->GetData();
+					matPointData.push_back(endPt.t());
+				}
+				//std::cout << "ALL LINE = " << vecAllLines.size() <<" "<<matLineData.rows << std::endl;
+				SLAM->RegistVisualData(User->mapName, "MapPoints", matPointData);
+			}
+			//auto vecAllLines = tempMap->GetAllData< StructOptimization::StructLine>();
+			//cv::Mat matLineData;
+			//for (int i = 0, iend = vecAllLines.size(); i < iend; i++) {
+			//	auto pML = vecAllLines[i];
+			//	if (!pML || pML->isBad())
+			//		continue;
+			//	StructOptimization::FrameLineObservation* pO = pML;
+			//	if (pO->Observations() < 2)
+			//		continue;
+			//	auto endPt = pML->GetEndPoints();
+			//	matLineData.push_back(endPt);
+			//}
+			////std::cout << "ALL LINE = " << vecAllLines.size() <<" "<<matLineData.rows << std::endl;
+			//SLAM->RegistVisualData(User->mapName, "MapLines", matLineData);
+
+			StructOptimization::StructMapper::bLineOptimization = false;
+			StructOptimization::StructMapper::bPlaneOptimization = true;
+			POOL->EnqueueJob(StructOptimization::StructMapper::ProcessMapping, tempMap, pSF, reconed, depthImg, P);
+			
+			cv::Mat blended2;
+			cv::Mat vis1 = img.clone();
+			cv::addWeighted(vis1, 0.7, vis_recon, 0.3, 0.0, blended2);
+
+			SLAM->VisualizeImage(mapName, blended2, nVisID + 3);
+
+			{
+				std::stringstream ss;
+				ss << "../res/images/" << frame->mnFrameID << "_candidate_wall_line.png";
+				cv::imwrite(ss.str(), blended2);
+				//ss.str("");
+				//ss << "../res/images/" << frame->mnFrameID << "_recon.png";
+				//cv::imwrite(ss.str(), blended);
+			}
+		}
+
+		if (!bMapping && bCommuTest && pRefKF && planedata.at<float>(0) >= 8.0) {
+			//{
+			//	//데이터 복원 테스트
+			//	//2 : size
+			//	//3부터 id와 파라메터
+			//	int startidx = 3;
+			//	int Nplane = (int)planedata.at<float>(2);
+			//	int N = (int)planedata.at<float>(2);
+			//	cv::Mat tempa = planedata.rowRange(3, planedata.rows);
+			//	cv::Mat P = tempa.reshape(1, N).colRange(1,5);
+			//	//std::cout << "asdfasdf a;sdlkfjasl;dfjadls;fkjasdf    " << P<< std::endl;
+			//	cv::Mat Kinv2 = cv::Mat::eye(4, 4, CV_32FC1);
+			//	Kinv.copyTo(Kinv2.colRange(0, 3).rowRange(0, 3));
+			//	//std::cout << Kinv2 << " " << Tinv << std::endl;
+
+			//	cv::Mat A = Tinv * Kinv2;
+			//	int idx = 0;
+			//	int inc = 1;
+			//	cv::Mat Temp = cv::Mat::ones(4, 640 * 480, CV_32FC1);
+			//	std::chrono::high_resolution_clock::time_point t5 = std::chrono::high_resolution_clock::now();
+			//	for (int x = 0; x < 640; x += inc) {
+			//		for (int y = 0; y < 480; y += inc) {
+			//			cv::Mat X = (cv::Mat_<float>(4, 1) << x, y, 1, 1);
+			//			X.copyTo(Temp.col(idx));
+			//			idx++;
+			//		}
+			//	}
+			//	//P = Np*4(normal + dist), P.col(3)(Np*1)
+			//	//B = 4 X N 
+			//	cv::Mat B = A * Temp;
+			//	cv::Mat temp2 = cv::Mat::ones(1, 640 * 480, CV_32FC1);
+			//	//Ow.push_back(cv::Mat::ones(1, 1, CV_32FC1));
+			//	cv::Mat Ow2 = Ow * temp2;
+
+			//	//3*N
+			//	cv::Mat dirs = B.rowRange(0,3) - Ow2;
+
+			//	//Np*N
+			//	cv::Mat normals = -P.colRange(0, 3)* dirs;
+			//	
+			//	//P x O = Np*3 3 1 =
+			//	cv::Mat dists = P.col(3);
+			//	cv::Mat normals2 = P.colRange(0, 3) * Ow;
+			//	normals2 += dists;
+			//	//std::cout <<"test=" << P << std::endl << normals2 << std::endl;
+			//	
+			//	cv::Mat vis2 = cv::Mat::zeros(480, 640, CV_8UC3);
+			//	idx = 0;
+
+			//	std::map<int, cv::Mat> mapDatas;
+			//	std::set<SemanticSLAM::Region*> setRegions;
+			//	for (int x = 0; x < 640; x += inc) {
+			//		for (int y = 0; y < 480; y += inc) {
+			//			cv::Mat res = normals.col(idx);
+			//			cv::Mat dir = dirs.col(idx);
+			//			float min_depth = FLT_MAX;
+			//			int min_id = -1;
+			//			for (int i = 0; i < N; i++) {
+			//				float depth = normals2.at<float>(i)/res.at<float>(i);
+			//				if (depth > 0.0){
+			//					if(depth < min_depth) {
+			//						min_id = i;
+			//						min_depth = depth;
+			//					}
+			//				}
+			//			}
+			//			if (min_depth < 1.0) {
+			//				if (min_id == 0) {
+			//					vis2.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
+			//					//region test
+			//					cv::Mat Xp = Ow + dir * min_depth;
+			//					int xidx, yidx, zidx;
+			//					SemanticSLAM::GridProcessor::ConvertIndex(Xp, xidx, yidx, zidx);
+			//					auto pRegion = SemanticSLAM::GridProcessor::SearchRegion(xidx, zidx);
+			//					if (pRegion && !setRegions.count(pRegion)) {
+			//						setRegions.insert(pRegion);
+			//					}
+			//				}
+			//				if (min_id == 1)
+			//					vis2.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 255, 0);
+			//				if (min_id == 2){
+			//					vis2.at<cv::Vec3b>(y, x) = cv::Vec3b(255, 0, 0);
+			//				}
+			//			}
+			//			idx++;
+			//		}
+			//	}
+
+			//	//light
+			//	auto lightPts = SemanticSLAM::SemanticProcessor::LightPTs.Get();
+			//	for (auto iter = lightPts.begin(), iend = lightPts.end(); iter != iend; iter++) {
+			//		cv::Mat X = iter->second;
+			//		cv::Mat Xcam = K*(Rcw* X + tcw);
+			//		float depth = Xcam.at<float>(2);
+			//		if (depth < 0)
+			//			continue;
+			//		cv::Point2f pt(Xcam.at<float>(0) / depth, Xcam.at<float>(1) / depth);
+			//		if (pt.x <= 0 || pt.x >= 640 || pt.y <= 0 || pt.y >= 480)
+			//			continue;
+			//		vis2.at<cv::Vec3b>(pt) = cv::Vec3b(0, 0, 0);
+			//	}
+
+			//	//region test
+			//	cv::RNG rng(12345);
+			//	for (auto iter` = setRegions.begin(), iend = setRegions.end(); iter != iend; iter++) {
+			//		auto pRegion = *iter;
+			//		//std::cout < < "region test = " << pRegion->ConnectedMPs.Size() << std::endl;
+			//		auto color = cv::Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+			//		int nOpt = 0;
+			//		auto vecMPs = pRegion->ConnectedMPs.ConvertVector();
+			//		for (int i = 0, mend = vecMPs.size(); i < mend; i++) {
+			//			auto pMPi = vecMPs[i];
+			//			if (!pMPi || pMPi->isBad())
+			//				continue;
+			//			if (pMPi->Observations() < 3)
+			//				nOpt++;
+			//		}
+			//	}
+			//	//region test
+
+			//	//blending
+			//	cv::Mat vis1 = img.clone();
+			//	cv::Mat blended;
+			//	cv::addWeighted(vis1, 0.5, vis2, 0.5, 0.0, blended);
+			//	SLAM->VisualizeImage(mapName, blended, nVisID+1);
+			//	SLAM->VisualizeImage(mapName, vis1, nVisID + 2);
+
+			//	{
+			//		//std::stringstream ss;
+			//		//ss << "../res/images/" << frame->mnFrameID << "_ori.png";
+			//		//cv::imwrite(ss.str(), vis1);
+			//		//ss.str("");
+			//		//ss << "../res/images/" << frame->mnFrameID << "_recon.png";
+			//		//cv::imwrite(ss.str(), blended);
+			//	}
+			//}
+
 		}
 	}
+
+	{
+		//좌표계 정합 테스트
+		if (User->MapDeviceTrajectories.Count(id))
+		{
+			cv::Mat F = cv::Mat::eye(4, 4, CV_32FC1);
+			F.at<float>(1, 1) = -1.0;
+			float s = User->ScaleFactor;
+			//std::cout << "scale = " << s << std::endl;
+			cv::Mat Tcoord = User->Tcoord.clone();
+			//Tcoord = Tcoord.inv();
+			//Tcoord = F * Tcoord * F;
+			cv::Mat tempImg = img.clone();
+			
+			cv::Mat Twc = User->MapDeviceTrajectories.Get(id).clone();
+			Twc = F * Twc * F;
+			cv::Mat Tcw = Twc.inv();
+			cv::Mat Ts = frame->GetPose();
+
+			if (User->MapAlignedDeviceTrajectories.Count(id)) {
+				cv::Mat Tawc = User->MapDeviceTrajectories.Get(id).clone();
+				cv::Mat Tacw = Tawc.inv();
+				for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++) {
+					auto pMPi = frame->mvpMapPoints[i];
+					if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i])
+						continue;
+					cv::Mat X = pMPi->GetWorldPos();
+					X.push_back(cv::Mat::ones(1, 1, CV_32FC1));
+					cv::Mat Xcam = Ts * X;
+					Xcam = Xcam.rowRange(0, 3);
+					cv::Mat proj = K * Xcam;
+					float depth = proj.at<float>(2);
+					cv::Point2f pt2(proj.at<float>(0) / depth, proj.at<float>(1) / depth);
+					cv::circle(tempImg, pt2, 3, cv::Scalar(255, 0, 0), -1);
+					cv::line(tempImg, frame->mvKeys[i].pt, pt2, cv::Scalar(0, 255, 0));
+					
+				}
+			}
+
+			std::map<int, cv::Mat> mapDatas;
+			if (SLAM->TemporalDatas2.Count("hcaaa")) {
+				mapDatas = SLAM->TemporalDatas2.Get("hcaaa");
+			}
+
+			for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++) {
+				auto pMPi = frame->mvpMapPoints[i];
+				if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i])
+					continue;
+				if (mapDatas.count(pMPi->mnId)) {
+					cv::Mat X = mapDatas[pMPi->mnId];
+					cv::Mat Xcam = F*Tcw * X;
+					Xcam = Xcam.rowRange(0, 3);
+					cv::Mat proj = K * Xcam;
+					float depth = proj.at<float>(2);
+					cv::Point2f pt2(proj.at<float>(0) / depth, proj.at<float>(1) / depth);
+					//cv::circle(tempImg, pt2, 3, cv::Scalar(255, 0, 0), -1);
+					//cv::line(tempImg, frame->mvKeys[i].pt, pt2, cv::Scalar(0, 255, 0));
+				}
+			}
+
+			for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++) {
+				auto pMPi = frame->mvpMapPoints[i];
+				if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i])
+					continue;
+				cv::Mat X = pMPi->GetWorldPos();
+				//X.at<float>(1) = -X.at<float>(1);
+				X.push_back(cv::Mat::ones(1, 1, CV_32FC1));
+				
+				cv::Mat Xnew = Twc*s*F*Ts*X;
+				mapDatas[pMPi->mnId] = Xnew;
+
+				////cv::Mat Xcoord = s*Tcoord * X;
+				////cv::Mat Xcam = s*T * X;
+				
+			}
+
+			SLAM->TemporalDatas2.Update("hcaaa", mapDatas);
+			SLAM->VisualizeImage(mapName, tempImg, nVisID + 1);
+		}
+	}
+
 	frame->mnShared--;
 	User->mnUsed--;
 	
@@ -1072,6 +1683,13 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 		cv::Mat Rcw = Pcw.rowRange(0, 3).colRange(0, 3);
 		cv::Mat tcw = Pcw.rowRange(0, 3).col(3);*/
 
+		cv::Mat gridImg = img.clone();
+		//light test
+		cv::Mat K2 = cv::Mat::eye(4, 4, CV_32FC1);
+		K.copyTo(K2.colRange(0, 3).rowRange(0, 3));
+		K2 = K2 * Pcw;
+		//light test
+
 		for (auto iter = vpLocalKFs.begin(), iend = vpLocalKFs.end(); iter != iend; iter++) {
 			auto pKFi = *iter;
 			if (SemanticSLAM::GridProcessor::GlobalKeyFrameNGrids.Count(pKFi)) {
@@ -1083,15 +1701,67 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 					setGrids.insert(pTempGrid);
 					int xidx, yidx, zidx;
 					SemanticSLAM::GridProcessor::ConvertIndex(pTempGrid->pos, xidx, yidx, zidx);
-					auto corners = SemanticSLAM::GridProcessor::ProjectdGrid(xidx, yidx, zidx, 0.1, K, Rcw, tcw);
-					vecProjectedCorners.push_back(corners);
+					/*if (pTempGrid->mbFloor) {
+						auto corners = SemanticSLAM::GridProcessor::ProjectedVoxelCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw);
+						vecProjectedCorners.push_back(corners);
+					}
+					if (pTempGrid->mbCeil) {
+						auto corners = SemanticSLAM::GridProcessor::ProjectedVoxelCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw,3);
+						vecProjectedCorners.push_back(corners);
+					}*/
+					if (pTempGrid->mbFloor) {
+						auto corners = SemanticSLAM::GridProcessor::ProjectedGridCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw);
+						vecProjectedCorners.push_back(corners);
+					}
+					if (pTempGrid->mbCeil) {
+						auto corners = SemanticSLAM::GridProcessor::ProjectedGridCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw,3);
+						vecProjectedCorners.push_back(corners);
+						if (pTempGrid->mpLightNode) {
+							auto pGraph = pTempGrid->mpLightNode;
+							cv::Mat temp = K2 * pGraph->pos;
+							float depth = temp.at<float>(2);
+							cv::Point2f pt(temp.at<float>(0) / depth, temp.at<float>(1) / depth);
+							cv::circle(gridImg, pt, 10, pGraph->color, -1);
+						}
+						//mapLight[lightid++] = K2 * pTempGrid->matLight.t();
+					}
+					if (pTempGrid->mbWall) {
+						auto corners2 = SemanticSLAM::GridProcessor::ProjectedGridCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw,2);
+						vecProjectedCorners.push_back(corners2);
+					}
 				}//for jter
 			}//if
 		}//iter
 
 		//그리드 시각화
 		//cv::Mat gridImage = cv::Mat::zeros(640, 360, CV_8UC3);
-		for (int i = 0, iend = vecProjectedCorners.size(); i < iend; i++) {
+		
+		////light 시각화
+		//{
+		//	cv::RNG rng(12345);
+		//	for (auto iter = mapLight.begin(), ien d = mapLight.end(); iter != iend; iter++) {
+		//		cv::Mat tempLight = iter->second;
+		//		cv::Vec3b color(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+		//		for (int i = 0; i < tempLight.cols; i++) {
+		//			cv::Mat temp = tempLight.col(i);
+		//			float depth = temp.at<float>(2);
+		//			cv::Point2f pt(temp.at<float>(0) / depth, temp.at<float>(1) / depth);
+		//			//visImg.at<cv::Vec3b>(pt) = color;
+		//			cv::circle(gridImg, pt, 1, color, -1);
+		//		}
+		//	}
+		//}
+		//그리드 시각화
+		//SemanticSLAM::GridProcessor::DrawGrids(vecProjectedCorners, gridImg);
+		//SLAM->VisualizeImage(mapName, gridImg, nVisID+3);
+
+		{
+			std::stringstream ss;
+			ss << "../res/images/" << frame->mnFrameID << "_grid.png";
+			cv::imwrite(ss.str(), gridImg.clone());
+		}
+
+		/*for (int i = 0, iend = vecProjectedCorners.size(); i < iend; i++) {
 			auto pair1 = vecProjectedCorners[i][0];
 			auto pair2 = vecProjectedCorners[i][1];
 			auto pair3 = vecProjectedCorners[i][2];
@@ -1115,9 +1785,15 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 				cv::line(visImg, pt4, pt2, cv::Scalar(255, 255, 0));
 			if (b4 && b3)
 				cv::line(visImg, pt4, pt3, cv::Scalar(255, 255, 0));
-		}
+		}*/
 	}
 	//그리드 시각화
+
+	/*{
+		std::stringstream ss;
+		ss << "../res/images/" << frame->mnFrameID << "_tracking.png";
+		cv::imwrite(ss.str(), visImg);
+	}*/
 
 	SLAM->VisualizeImage(mapName, visImg, nVisID);
 	////시각화 및 칼만필터 적용
@@ -1560,7 +2236,7 @@ void TrackWithObjects(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::s
 					setGrids.insert(pTempGrid);
 					int xidx, yidx, zidx;
 					SemanticSLAM::GridProcessor::ConvertIndex(pTempGrid->pos, xidx, yidx, zidx);
-					auto corners = SemanticSLAM::GridProcessor::ProjectdGrid(xidx, yidx, zidx, 0.1, K, Rcw, tcw);
+					auto corners = SemanticSLAM::GridProcessor::ProjectedGridCorners(xidx, yidx, zidx, 0.1, K, Rcw, tcw);
 					vecProjectedCorners.push_back(corners);
 				}//for jter
 			}//if
@@ -1740,9 +2416,14 @@ int main(int argc, char* argv[])
 	EdgeSLAM::SLAM* SLAM = new EdgeSLAM::SLAM(POOL);
 	SemanticSLAM::SemanticProcessor* SemanticProcessor = new SemanticSLAM::SemanticProcessor();
 	SemanticSLAM::SemanticProcessor::Init(SLAM);
+	SemanticSLAM::GridProcessor::Init(5, 480, 640);
 	SemanticSLAM::PlaneEstimator::Init();
 	SemanticSLAM::ContentProcessor::mbSaveLatency = bSaveVOLatency;
+	SemanticSLAM::LineProcessor::Init();
 	
+	StructOptimization::StructMapper::BaseSLAMSystem = BaseSLAMSystem;
+	SemanticSLAM::SemanticProcessor::BaseSLAMSystem = BaseSLAMSystem;
+
 	//UVR_SLAM::System* SLAM_SYSTEM = new UVR_SLAM::System(strParamPath);
 	//bool bSLAM_Running = false;
 	//SLAM_SYSTEM->mptMappingServer = new std::thread(&UVR_SLAM::MappingServer::RunWithMappingServer, SLAM_SYSTEM->mpMappingServer);
@@ -1761,7 +2442,7 @@ int main(int argc, char* argv[])
 		sendKeywords.push_back("RPlaneEstimation");		pairKeywords.push_back("NONE");
 		sendKeywords.push_back("RequestSegmentation");		pairKeywords.push_back("Segmentation");
 		sendKeywords.push_back("RequestObjectDetection");	pairKeywords.push_back("ObjectDetection");
-		//sendKeywords.push_back("RequestDepth");				pairKeywords.push_back("Depth");
+		sendKeywords.push_back("RequestDepth");				pairKeywords.push_back("Depth");
 		//sendKeywords.push_back("MappingResult");			pairKeywords.push_back("NONE");
 		sendKeywords.push_back("Content");					pairKeywords.push_back("ContentGeneration");
 		////평면 정보 공유
@@ -2029,7 +2710,7 @@ int main(int argc, char* argv[])
 				POOL->EnqueueJob(SemanticSLAM::CoordinateIntegration::DownloadPose, SLAM, src, id);
 			}
 			else if (keyword == "DevicePoseForAlign") {
-				//POOL->EnqueueJob(DeviceCoordAlignTest, POOL, SLAM, src, ss.str(), id, ts);
+				POOL->EnqueueJob(DeviceCoordAlignTest, POOL, SLAM, src, ss.str(), id, ts);
 			}
 			else if (keyword == "ARFoundationMPs") {
 				POOL->EnqueueJob(SemanticSLAM::CoordinateIntegration::Process, SLAM, src, id);
@@ -2156,7 +2837,13 @@ int main(int argc, char* argv[])
 						//SemanticSLAM::PlaneEstimator::SaveNormal();
 						auto pMap = SLAM->GetMap(tempMapName);
 						EdgeSLAM::PlanarOptimizer::GlobalBundleAdjustemnt(SLAM, pMap);
+						std::cout << "Map Update With Plane" << std::endl;
 						SemanticSLAM::SemanticProcessor::MapUpdateWithPlane(SLAM, pMap);
+						SemanticSLAM::GridProcessor::UpdateGridAndRegion();
+						std::cout << "Update Graph Node" << std::endl;
+						//SemanticSLAM::GridProcessor::UpdateSemanticGraphNode(SLAM);
+
+						//SemanticSLAM::DepthProcessor::PlanarDepthMapUpdate(SLAM);
 						//SemanticSLAM::SemanticProcessor::ObjectMapUpdateWithPlane(SLAM, pMap);
 					}
 					if (SLAM->GetConnectedDevice() == 0) {
@@ -2244,7 +2931,9 @@ int main(int argc, char* argv[])
 				if (!SLAM->CheckMap(mapName)) {
 					std::cout << "Create Map" << std::endl;
 					SLAM->CreateMap(mapName, quality);
+					
 					SLAM->InitVisualizer(user, mapName, w, h);
+					
 				}
 				if (!SLAM->CheckUser(user)) {
 					std::cout << "Create User" << std::endl;
@@ -2253,6 +2942,19 @@ int main(int argc, char* argv[])
 						SLAM->SetUserVisID(SLAM->GetUser(user));
 				}
 
+				{
+					//BaseSLAM
+					if (!BaseSLAMSystem->isMapInSystem(mapName)) {
+						//auto newMap = new BaseSLAM::AbstractMap(mapName);
+						auto newMap = new StructOptimization::StructMap(mapName);
+						BaseSLAMSystem->AddMap(newMap);
+					}
+					auto tempMap = BaseSLAMSystem->GetMap(mapName);
+					if (!tempMap->isDeviceInMap(user)) {
+						auto newUser = new BaseSLAM::BaseDevice(user, mapName, w, h, fx, fy, cx, cy, d1, d2, d3, d4, d5);
+						tempMap->AddDevice(newUser);
+					}
+				}
 				//트래픽 저장용
 				{
 					std::stringstream ssfile1;
@@ -2468,7 +3170,8 @@ int main(int argc, char* argv[])
 				auto temp = std::get<0>(var);*/
 			}
 			else if (keyword == "Depth") {
-				SLAM->ProcessDepthEstimation(src, id);
+				//SLAM->ProcessDepthEstimation(src, id);
+				POOL->EnqueueJob(SemanticSLAM::DepthProcessor::DepthProcessing, SLAM, src, id);
 			}
 			else if (keyword == "VO.CREATE") {
 				POOL->EnqueueJob(SemanticSLAM::ContentProcessor::ContentProcess, SLAM, src, id,keyword, ts,0);
