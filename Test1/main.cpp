@@ -196,7 +196,7 @@ void CallBackFunc(int event, int x, int y, int flags, void* userdata)
 		Xp.copyTo(vo.rowRange(3, 6));
 		std::chrono::high_resolution_clock::time_point t_up_start = std::chrono::high_resolution_clock::now();
 		std::stringstream ss;
-		ss << "/Store?keyword=" << "VO.CREATE" << "&id=" << nVOID++ << "&src=" << src << "&ts=" << t_up_start.time_since_epoch().count();// << " & type2 = " << user->userName;
+		ss << "/Upload?keyword=" << "VO.CREATE" << "&id=" << nVOID++ << "&src=" << src << "&ts=" << t_up_start.time_since_epoch().count();// << " & type2 = " << user->userName;
 		API->Send(ss.str(), vo.data, vo.rows * sizeof(float));
 
 		////가상 객체 등록
@@ -642,7 +642,7 @@ void SendVirtualObject(WebAPI* api, std::string src) {
 	vo.at<float>(0) = 17;
 	std::chrono::high_resolution_clock::time_point t_up_start = std::chrono::high_resolution_clock::now();
 	std::stringstream ss;
-	ss << "/Store?keyword=" << "VO.CREATE" << "&id=" << nSendID << "&src=" << src<<"&ts="<<t_up_start.time_since_epoch().count();// << " & type2 = " << user->userName;
+	ss << "/Upload?keyword=" << "VO.CREATE" << "&id=" << nSendID << "&src=" << src<<"&ts="<<t_up_start.time_since_epoch().count();// << " & type2 = " << user->userName;
 	api->Send(ss.str(), vo.data, vo.rows * sizeof(float));
 	std::chrono::high_resolution_clock::time_point t_up_end = std::chrono::high_resolution_clock::now();
 
@@ -663,7 +663,7 @@ void SendImageData(WebAPI* api, const cv::Mat& img, std::string src, std::string
 	cv::Mat encoded(buffer);
 	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
 	std::stringstream ss;
-	ss << "/Store?keyword="<< keyword <<"&id=" << fid << "&src=" << src<<"&ts="<<t_start.time_since_epoch().count()<<"&ts2="<< std::setprecision(16) <<timestamp;
+	ss << "/Upload?keyword="<< keyword <<"&id=" << fid << "&src=" << src<<"&ts="<<t_start.time_since_epoch().count()<<"&ts2="<< std::setprecision(16) <<timestamp;
 	auto res = api->Send(ss.str(), encoded.data, encoded.rows);
 	nSendID = fid;
 	std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
@@ -712,10 +712,10 @@ void ReceiveData(SOCKET sock) {
 			std::stringstream ss;
 			if (document.HasMember("id2")) {
 				id2 = document["id2"].GetInt();
-				ss << "/Load?keyword=" << keyword << "&id=" << id << "&id2=" << id2 << "&src=" << src;
+				ss << "/Download?keyword=" << keyword << "&id=" << id << "&id2=" << id2 << "&src=" << src;
 			}
 			else
-				ss << "/Load?keyword=" << keyword << "&id=" << id << "&src=" << src;
+				ss << "/Download?keyword=" << keyword << "&id=" << id << "&src=" << src;
 
 			/*if (!mbSuccessInitialization) {
 				mbSuccessInitialization = true;
@@ -1166,7 +1166,7 @@ int main(int argc, char* argv[]) {
 		cv::Mat temp3(strtemp.length(), 1, CV_8UC1, (void*)strtemp.c_str());
 		temp1.push_back(temp3);
 		std::stringstream ss;
-		ss << "/Store?keyword=SimDeviceConnect&id=" << fid << "&src=" << src;// << "&type2=" << user->userName;
+		ss << "/Upload?keyword=SimDeviceConnect&id=" << fid << "&src=" << src;// << "&type2=" << user->userName;
 		auto res = API.Send(ss.str(), temp1.data, temp1.rows);
 
 		//이미지 전송
@@ -1250,7 +1250,7 @@ int main(int argc, char* argv[]) {
 		{
 			std::stringstream ss;
 			cv::Mat temp = cv::Mat::zeros(1000, 1, CV_32FC1);
-			ss << "/Store?keyword=SimDeviceDisconnect&id=" << fid << "&src=" << src;// << "&type2=" << user->userName;
+			ss << "/Upload?keyword=SimDeviceDisconnect&id=" << fid << "&src=" << src;// << "&type2=" << user->userName;
 			auto res = API.Send(ss.str(), temp.data, temp.rows);
 
 			SaveLatency();

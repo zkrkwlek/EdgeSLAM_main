@@ -619,7 +619,7 @@ void TestDataGenerator(std::string keyword, std::string src) {
 		std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 		{
 			std::stringstream ss;
-			ss << "/Store?keyword=" << keyword << "&id=" << ++nID << "&src=" << src;
+			ss << "/Upload?keyword=" << keyword << "&id=" << ++nID << "&src=" << src;
 			auto res = API.Send(ss.str(), data.data, sizeof(unsigned char)*data.rows);
 			LatencyMapStart.Update(nID, start);
 		}
@@ -694,14 +694,14 @@ void SimulatorThread1() {
 		{
 			
 			std::stringstream ss;
-			ss << "/Store?keyword="<< sKeyword1 <<"&id=" << ++nID << "&src="<<SOURCE;
+			ss << "/Upload?keyword="<< sKeyword1 <<"&id=" << ++nID << "&src="<<SOURCE;
 			auto res = API.Send(ss.str(), data.data, sizeof(unsigned char)*data.rows);
 			LatencyMapStart.Update(nID, start);
 		}
 
 		{
 			std::stringstream ss;
-			ss << "/Store?keyword=" << sKeyword2 << "&id=" << ++nID << "&src=" << SOURCE;
+			ss << "/Upload?keyword=" << sKeyword2 << "&id=" << ++nID << "&src=" << SOURCE;
 			auto res = API.Send(ss.str(), data.data, sizeof(unsigned char)*data.rows);
 			LatencyMapStart.Update(nID, start);
 		}
@@ -784,7 +784,7 @@ void SendWiseUITest(std::string src, int id, cv::Mat data, double ts) {
 	{
 		WebAPI API("143.248.6.143", 35005);
 		std::stringstream ss;
-		ss << "/Store?keyword=WiseUITest&id=" << id << "&src=" << src << "&ts=" << std::fixed << std::setprecision(6) << ts << "&type2=" << src;
+		ss << "/Upload?keyword=WiseUITest&id=" << id << "&src=" << src << "&ts=" << std::fixed << std::setprecision(6) << ts << "&type2=" << src;
 		auto res = API.Send(ss.str(), data.data, data.rows * sizeof(float));
 	}
 }
@@ -1083,6 +1083,58 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 
 //BaseSLAM
 BaseSLAM::BaseSLAM* BaseSLAMSystem = new BaseSLAM::BaseSLAM();
+
+void TrackRGBD(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
+	if (!SLAM->CheckUser(src)) {
+		return;
+	}
+	auto User = SLAM->GetUser(src);
+	if (!User)
+		return;
+	User->mnUsed++;
+	
+	int nVisID = User->GetVisID() + 4;
+	std::string mapName = User->mapName;
+
+
+	WebAPI API(ip, port);
+	std::chrono::high_resolution_clock::time_point t_down_start = std::chrono::high_resolution_clock::now();
+	std::stringstream ss;
+	ss << "/Download?keyword=" << "DImage" << "&id=" << id << "&src=" << src;
+	auto res = API.Send(ss.str(), "");
+	std::chrono::high_resolution_clock::time_point t_down_end = std::chrono::high_resolution_clock::now();
+	cv::Mat temp = cv::Mat(res.size(), 1, CV_8UC1, (void*)res.data());
+	cv::Mat img = cv::imdecode(temp, cv::IMREAD_COLOR);
+	cv::Mat visImg = img.clone();
+	
+	//인코딩 정보 저장
+	User->ImageDatas.Update(id, temp.clone());
+
+	//depth 다운로드
+	ss.str("");
+	ss << "/Download?keyword=" << "DDepth" << "&id=" << id << "&src=" << src;
+	auto res2 = API.Send(ss.str(), "");
+	cv::Mat tempdepth = cv::Mat(res2.size(), 1, CV_8UC1, (void*)res2.data());
+	cv::Mat depthsrc = cv::imdecode(tempdepth, cv::IMREAD_ANYDEPTH); //16U, ushort
+	
+	//frame 생성
+	cv::Mat imDepth;
+	depthsrc.convertTo(imDepth, CV_32F, User->mpCamera->mDepthMapFactor);
+	EdgeSLAM::Frame* frame = new EdgeSLAM::Frame(img, imDepth, User->mpCamera, id, User->mpCamera->mbf, User->mpCamera->mThDepth, frame_ts);
+
+	std::cout << frame->mvDepth.size() << " " << std::endl;
+	//depth 시각화
+	SLAM->VisualizeImage(mapName, visImg, nVisID);
+	{
+		//16short -> float 변환 후 노말라이즈
+		cv::Mat depth;
+		cv::normalize(depthsrc, depth, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+		cv::cvtColor(depth, depth, cv::COLOR_GRAY2BGR);
+		std::string mapName = User->mapName;
+		SLAM->VisualizeImage(mapName, depth, nVisID+1);
+	}
+	User->mnUsed--;
+}
 
 void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
 	if (!SLAM->CheckUser(src)) {
@@ -2505,13 +2557,13 @@ int main(int argc, char* argv[])
 		WebAPI* mpAPI = new WebAPI(ip, port);
 
 		receivedKeywords.push_back("Image");
+		receivedKeywords.push_back("Depth");
 		receivedKeywords.push_back("Gyro");
 		receivedKeywords.push_back("Accelerometer");
 		receivedKeywords.push_back("DeviceConnect");
 		receivedKeywords.push_back("DeviceDisconnect");
 		receivedKeywords.push_back("ObjectDetection");
 		receivedKeywords.push_back("Segmentation");
-		receivedKeywords.push_back("Depth");
 				
 		receivedKeywords.push_back("DevicePosition");
 		//receivedKeywords.push_back("RPlaneEstimation");
@@ -2530,6 +2582,11 @@ int main(int argc, char* argv[])
 		receivedKeywords.push_back("TestInter");
 		receivedKeywords.push_back("TouchA");
 		///////////test
+
+		//dslam
+		receivedKeywords.push_back("DImage");
+		receivedKeywords.push_back("DDepth");
+		//dslam
 
 		/////동기화 테스트
 		receivedKeywords.push_back("ds");
@@ -2681,10 +2738,10 @@ int main(int argc, char* argv[])
 			std::stringstream ss;
 			if (document.HasMember("id2")) {
 				id2 = document["id2"].GetInt();
-				ss << "/Load?keyword=" << keyword << "&id=" << id << "&id2=" << id2 << "&src=" << src;
+				ss << "/Download?keyword=" << keyword << "&id=" << id << "&id2=" << id2 << "&src=" << src;
 			}
 			else
-				ss << "/Load?keyword=" << keyword << "&id=" << id << "&src=" << src;
+				ss << "/Download?keyword=" << keyword << "&id=" << id << "&src=" << src;
 
 			//datset ts
 			double ts2 = ts;
@@ -2696,6 +2753,13 @@ int main(int argc, char* argv[])
 			if (keyword == "Image") {
 				POOL->EnqueueJob(Track, POOL, SLAM, src, ss.str(), id, ts,ts2);
 				//POOL->EnqueueJob(SemanticSLAM::SemanticProcessor::ObjectTracking, SLAM, src, id);
+			}
+			else if (keyword == "DImage") {
+				//std::cout << keyword << ", " << id << std::endl;
+			}
+			else if (keyword == "DDepth") {
+				//std::cout << keyword << ", " << id << std::endl;
+				POOL->EnqueueJob(TrackRGBD, POOL, SLAM, src, ss.str(), id, ts, ts2);
 			}
 			else if(keyword == "SimImage") {
 				POOL->EnqueueJob(SimTrack, POOL, SLAM, src, ss.str(), id, ts,ts2);
@@ -2894,8 +2958,8 @@ int main(int argc, char* argv[])
 				int quality = (int)f.at<float>(nidx++);
 				int nskip = (int)f.at<float>(nidx++);
 				int nContentKFs = (int)f.at<float>(nidx++);
+								
 				int nbFlagIdx = nInt * 4;
-				
 				bool bMapping = (int)res[nbFlagIdx] ? true : false;
 				bool bTracking = (int)res[nbFlagIdx+1] ? true : false;
 				bool bIMU = (int)res[nbFlagIdx+2] ? true : false;
@@ -2914,6 +2978,8 @@ int main(int argc, char* argv[])
 				vbFlags[5] = bEdgeBase;
 				vbFlags[6] = bCommuTest;
 				vbFlags[7] = bContentSyncTest;
+				
+				//depth 정보
 				
 				//std::cout << f.t() << ", " << src << std::endl;
 				//std::cout << bEdgeBase <<" "<< bKFMethod<<" || " << " " << bMapping << " " << bTracking << " " << bIMU << " " << bSave << " " << bAsyncTest << "=" << vstr[0] << " " << vstr[1] << std::endl;
@@ -2937,13 +3003,14 @@ int main(int argc, char* argv[])
 				}
 				if (!SLAM->CheckUser(user)) {
 					std::cout << "Create User" << std::endl;
-					SLAM->CreateUser(user, mapName, w, h, fx, fy, cx, cy, d1, d2, d3, d4, d5, quality, nskip, nContentKFs, vbFlags);
+					SLAM->CreateUser(user, mapName, f, vbFlags);
 					if(keyword =="DeviceConnect")
 						SLAM->SetUserVisID(SLAM->GetUser(user));
 				}
 
 				{
 					//BaseSLAM
+					//파라메터 관련 수정 필요함.
 					if (!BaseSLAMSystem->isMapInSystem(mapName)) {
 						//auto newMap = new BaseSLAM::AbstractMap(mapName);
 						auto newMap = new StructOptimization::StructMap(mapName);
