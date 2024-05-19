@@ -1092,7 +1092,7 @@ void TrackRGBD(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string s
 	if (!User)
 		return;
 	User->mnUsed++;
-	
+
 	int nVisID = User->GetVisID() + 4;
 	std::string mapName = User->mapName;
 
@@ -1106,7 +1106,7 @@ void TrackRGBD(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string s
 	cv::Mat temp = cv::Mat(res.size(), 1, CV_8UC1, (void*)res.data());
 	cv::Mat img = cv::imdecode(temp, cv::IMREAD_COLOR);
 	cv::Mat visImg = img.clone();
-	
+
 	//인코딩 정보 저장
 	User->ImageDatas.Update(id, temp.clone());
 
@@ -1116,13 +1116,39 @@ void TrackRGBD(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string s
 	auto res2 = API.Send(ss.str(), "");
 	cv::Mat tempdepth = cv::Mat(res2.size(), 1, CV_8UC1, (void*)res2.data());
 	cv::Mat depthsrc = cv::imdecode(tempdepth, cv::IMREAD_ANYDEPTH); //16U, ushort
-	
+
 	//frame 생성
 	cv::Mat imDepth;
 	depthsrc.convertTo(imDepth, CV_32F, User->mpCamera->mDepthMapFactor);
 	EdgeSLAM::Frame* frame = new EdgeSLAM::Frame(img, imDepth, User->mpCamera, id, User->mpCamera->mbf, User->mpCamera->mThDepth, frame_ts);
 
-	std::cout << frame->mvDepth.size() << " " << std::endl;
+	std::chrono::high_resolution_clock::time_point t_track_start = std::chrono::high_resolution_clock::now();
+	EdgeSLAM::Tracker::Track(POOL, SLAM, id, src, frame, img, frame_ts);
+	std::chrono::high_resolution_clock::time_point t_track_end = std::chrono::high_resolution_clock::now();
+
+	auto pRefKF = User->mpRefKF;
+	auto trackStat = User->GetState();
+	bool bTrackSuccess = trackStat == EdgeSLAM::UserState::Success && frame->mvpMapPoints.size() > 0;
+	bool bCommuTest = User->mbCommuTest;
+	int nContentKFs = User->mnContentKFs;
+	bool bMapping = User->mbMapping;
+
+	if (User->mbNewKF) {
+		User->mbNewKF = false;
+		std::string nsrc = src + ".DImage";
+		Utils::SendReqMessage("RequestObjectDetection", nsrc, id);
+		Utils::SendReqMessage("RequestSegmentation", nsrc, id);
+	}
+
+	if (bTrackSuccess) {
+		for (int i = 0, N = frame->mvpMapPoints.size(); i < N; i++) {
+			auto pMPi = frame->mvpMapPoints[i];
+			if (!pMPi || pMPi->isBad() || frame->mvbOutliers[i])
+				continue;
+			auto pt = frame->mvKeys[i].pt;
+			cv::circle(visImg, pt, 3, cv::Scalar(0, 255, 0), 1);
+		}
+	}
 	//depth 시각화
 	SLAM->VisualizeImage(mapName, visImg, nVisID);
 	{
@@ -1333,8 +1359,9 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	//User->mbNewKF = true;
 	if (User->mbNewKF) {
 		User->mbNewKF = false;
-		Utils::SendReqMessage("RequestObjectDetection", src, id);
-		Utils::SendReqMessage("RequestSegmentation", src, id);
+		std::string tsrc = src + ".Image";
+		Utils::SendReqMessage("RequestObjectDetection", tsrc, id);
+		Utils::SendReqMessage("RequestSegmentation", tsrc, id);
 		//Utils::SendReqMessage("RequestDepth", src, id);
 
 		//쓰레드풀로

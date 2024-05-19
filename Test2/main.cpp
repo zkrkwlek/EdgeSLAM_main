@@ -263,13 +263,18 @@ int main(int argc, char* argv[]) {
 		auto res = API.Send(ss.str(), temp1.data, temp1.rows);
 	}
 	
+	int fps = 30;
+	double tframe = ((double)1.0) / fps;
+
 	for (int i = 0; i < ids.rows; i++) {
+		std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+
 		int id = i + 1;
 		//std::cout << id << std::endl;
 
-		if (id % nskip == 0)
+		if (id % nskip != 0)
 			continue;
-
+		
 		std::stringstream ss;
 		ss << "/Download?keyword="<<keydataset<<""<<"&id="<<id<<"&src="<<srcc;// << " & type2 = " << user->userName;
 		auto res = API.Send(ss.str(), "");
@@ -290,12 +295,21 @@ int main(int argc, char* argv[]) {
 			API.Send(ss.str(), ddata.data, ddata.rows);
 		}
 
+		std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+		double ttrack = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count();
+		if (ttrack < tframe) {
+			auto diff = (tframe - ttrack) * 1e3;
+			long long delay = (long long)diff;
+			std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+			//std::cout << "delay = " << delay << std::endl;
+		}
+
 	}
 	
 	{
 		std::stringstream ss;
 		cv::Mat temp = cv::Mat::zeros(1000, 1, CV_32FC1);
-		ss << "/Upload?keyword=DeviceDisconnect&id=" << ids.size() << "&src=" << src;// << "&type2=" << user->userName;
+		ss << "/Upload?keyword=DeviceDisconnect&id=" << ids.rows << "&src=" << src;// << "&type2=" << user->userName;
 		auto res = API.Send(ss.str(), temp.data, temp.rows);
 	}
 
