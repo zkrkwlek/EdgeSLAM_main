@@ -103,6 +103,15 @@ std::string trajectoryPath;
 bool bCaptureDepth = false;
 bool bGridCommu = false;
 bool bPlaneGBA = false;
+bool bPLP = false;
+bool bSave = false;
+int nCamType = 0;// 0 : mono, 1 : stereo, 2 : rgbd
+int nIMUType = 0;// 0 : NONE, 1 : gyro, 2 : gyro + acc
+int nFeature = 1000;
+std::string keydataset = "";
+std::string scene_id = "";
+std::string src_cam = "";
+
 
 bool bPlay = false; //종료 없이 재생
 double ts_last;
@@ -876,6 +885,29 @@ void parsing(char* argv[], int& index) {
 	{
 		rgbfile = argv[index++];
 	}
+	else if (keyword == "--plp") {
+		bPLP = true;
+	}
+	else if (keyword == "--dataset")
+	{
+		keydataset = argv[index++];
+		scene_id = argv[index++];
+		src_cam = argv[index++];
+		src_cam += ".intrinsic";
+	}
+	else if (keyword == "--features")
+	{
+		nFeature = atoi(argv[index++]);
+	}
+	else if (keyword == "--CAM") {
+		nCamType = atoi(argv[index++]);
+	}
+	else if (keyword == "--IMU") {
+		nIMUType = atoi(argv[index++]);
+	}
+	else if (keyword == "--SAVE") {
+		bSave = true;
+	}
 }
 
 void parser(int argc, char* argv[], int index) {
@@ -1095,7 +1127,7 @@ int main(int argc, char* argv[]) {
 		
 		//여기서부터 파싱 시작
 		parser(argc, argv, idxArgv);
-		LoadDataset* dataset = (LoadDataset*)new TumDataset(dir, rgbfile);
+		LoadDataset* dataset = (LoadDataset*)new TumDataset(dir, paramPath, rgbfile);
 
 		std::vector<int> tempParam(2);
 		tempParam[0] = cv::IMWRITE_JPEG_QUALITY;
@@ -1121,7 +1153,7 @@ int main(int argc, char* argv[]) {
 		for (int i = 0, iend = sendKeywords.size(); i < iend; i++) {
 			std::stringstream ss;
 			ss << "{\"src\":\"" << src << "\"," << "\"keyword\":\"" << sendKeywords[i] << "\",\"type1\":\"server\",\"type2\":\"" << pairKeywords[i] << "\"" << ",\"capacity\":" << 300 << "}"; //test\"}";
-			auto res = API.Send("/Connect", ss.str());
+			auto res = API.Send("/Connect", ss.str()); 
 		}
 
 		for (int i = 0, iend = receivedKeywords.size(); i < iend; i++) {
@@ -1150,9 +1182,13 @@ int main(int argc, char* argv[]) {
 		int nInt = 20;
 		int nByte = 10;
 
+		//bf, th, depthfactor 항상 확인
 		cv::Mat temp1 = cv::Mat::zeros(nInt * 4 + nByte, 1, CV_8UC1);
-		cv::Mat temp2 = (cv::Mat_<float>(14, 1) << w, h, fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0, quality, nskip, 10);
-		std::memcpy(temp1.data, temp2.data, 56);
+		cv::Mat temp2 = (cv::Mat_<float>(20, 1) << w, h, fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0, 
+			quality, nskip, 30, 
+			40.0,40.0,5000.0,
+			0,0,0);
+		std::memcpy(temp1.data, temp2.data, nInt * 4);
 
 		int nbFlagIdx = nInt * 4;
 		//매핑
@@ -1162,6 +1198,7 @@ int main(int argc, char* argv[]) {
 		temp1.at<uchar>(nbFlagIdx + 5) = bSyncLocalMap ? 1 : 0;
 		temp1.at<uchar>(nbFlagIdx + 7) = bGridCommu ? 1 : 0;
 		temp1.at<uchar>(nbFlagIdx + 8) = bVOTest ? 1 : 0;
+		temp1.at<uchar>(nbFlagIdx + 9) = bPLP?1:0; //PLP test
 		std::string strtemp = src + ","+mapname;
 		cv::Mat temp3(strtemp.length(), 1, CV_8UC1, (void*)strtemp.c_str());
 		temp1.push_back(temp3);

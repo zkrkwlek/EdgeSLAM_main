@@ -112,6 +112,7 @@
 #include <ObjectMatcher.h>
 #include <ObjectMapper.h>
 #include <InstanceLinker.h>
+#include <ObjectMatchingInfo.h>
 
 using namespace cv::line_descriptor;
 
@@ -258,7 +259,7 @@ bool consoleHandler(int signal) {
 			int retval;
 			retval = sendto(sock, buf, strlen(buf), 0, (sockaddr*)&serveraddr, sizeof(serveraddr));
 		}*/
-
+		WebAPI::Close();
 		exit(1);
 	}
 	return true;
@@ -1116,6 +1117,7 @@ bool bPrev = false;
 std::vector<cv::KeyPoint> prevKPs;
 //test object optical flow
 
+//정말 박스만 생성하고 넘기기
 ObjectSLAM::ObjectSLAM *ObjSystem = new ObjectSLAM::ObjectSLAM();
 ConcurrentMap<EdgeSLAM::KeyFrame*, ObjectSLAM::BoxFrame*> AllBoxFrames;
 void ObjectDetection2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
@@ -1131,11 +1133,38 @@ void ObjectDetection2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 	}*/
 	if (!ObjSystem->MapObjectDevices.Count(User))
 		return;
+	if (!ObjSystem->MapKeyFrameNBoxFrame.Count(id))
+	{
+		std::cout << "find keyframe failed " << id << std::endl;
+		return;
+	}
+
 	auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
 	User->mnUsed++;
-
-	auto pNewBF = pObjDevice->mpCurrBF;
+	auto pNewBF = ObjSystem->MapKeyFrameNBoxFrame.Get(id);//pObjDevice->mpCurrBF;
+	
 	auto pKF = pNewBF->mpRefKF;
+	
+	{ 
+		std::unique_lock<std::mutex> lock(ObjSystem->mMutexMatches);
+		for (auto ppair : ObjSystem->MapMatches) {
+			auto pair = ppair.first;
+			auto pMatch = ppair.second;
+			if (pair.second == id) {
+				std::cout << "match = " << pair.first << " " << pair.second << std::endl;
+			} 
+		}
+		/*auto pair = std::make_pair(id, pKF->mnFrameId);
+		if (ObjSystem->MapMatches.count(pair)) {
+			std::cout << "asdf = " << pair.first<<" "<<pair.second << std::endl;
+		}
+		else {
+			std::cout << "not asdf = " << pair.first << " " << pair.second << std::endl;
+		}*/
+	}
+
+	/*auto pNewBF = pObjDevice->mpCurrBF;
+	auto pKF = pNewBF->mpRefKF;*/
 
 	std::string mapName = User->mapName;
 	bool mbSave = User->mbSave;
@@ -1174,10 +1203,11 @@ void ObjectDetection2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 		auto pair = std::make_pair(rect, std::vector<cv::Point2f>());
 		
 		//객체 정보
-		/*cv::rectangle(image, left, right, cv::Scalar(255, 255, 255), 2);
+		cv::rectangle(image, left, right, cv::Scalar(255, 255, 255), 2);
 		cv::Point2f pt(left.x + (right.x - left.x) / 2, left.y + 20);
-		cv::putText(image, SemanticSLAM::SemanticProcessor::vecStrObjectLabels[label - 1], pt, 2, 1.2, cv::Scalar(255, 255, 255));*/
+		cv::putText(image, SemanticSLAM::SemanticProcessor::vecStrObjectLabels[label - 1], pt, 2, 1.2, cv::Scalar(255, 255, 255));
 	}
+	pNewBF->mbYolo = true;
 	User->mnUsed--;
 	
 	//pNewBF->img = image.clone();
@@ -1185,9 +1215,9 @@ void ObjectDetection2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 	//테스트 필요함.
 	//pNewBF->BaseObjectRegistration(pKF);
 
-	SLAM->VisualizeImage(User->mapName, pNewBF->img, 0);
+	SLAM->VisualizeImage(User->mapName, image, 0);
 	//여기까지가 오브젝트 디텍션.
-	
+	return;
 	auto pPrevBF = pObjDevice->mpPrevBF;
 	
 	//이전 프레임과 매칭
@@ -1888,34 +1918,38 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 	{
 		auto vpBFs = ObjSystem->GetConnectedBoxFrames(pKF, 10);
 
-		//new bf
-		std::set<int> setLabels;
-		for (auto pair : pNewBF->mmpBBs) {
-			setLabels.insert(pair.second->mpConfLabel->label);
-		}
-		//label, local BF
-		std::map<int, ObjectSLAM::BoxFrame*> mmpLabelNFrame;
-		
-		for (auto pBF : vpBFs) {
-			for (auto pair : pBF->mmpBBs) {
-				auto pIns = pair.second;
-				int label = pIns->mpConfLabel->label;
+		////현재 프레임에 없는 것 체크하는 코드
+		////new bf
+		//std::set<int> setLabels;
+		//for (auto pair : pNewBF->mmpBBs) {
+		//	setLabels.insert(pair.second->mpConfLabel->label);
+		//}
+		////label, local BF
+		//std::map<int, ObjectSLAM::BoxFrame*> mmpLabelNFrame;
+		//
+		//for (auto pBF : vpBFs) {
+		//	for (auto pair : pBF->mmpBBs) {
+		//		auto pIns = pair.second;
+		//		int label = pIns->mpConfLabel->label;
+		//		float conf = pIns->mpConfLabel->maxConf;
+		//		if (!pIns->mbIsthing || pIns->isTable())
+		//			continue;
 
-				if (!pIns->mbIsthing || pIns->isTable())
-					continue;
-
-				if(!setLabels.count(label) && !mmpLabelNFrame.count(label)){
-					mmpLabelNFrame[label] = pBF;
-					std::cout << "missing label = " << pIns->mStrLabel <<" "<<label << std::endl;
-				}
-			}
-		}
-		std::cout << "asdf test = " << mmpLabelNFrame.size() << std::endl;
+		//		if(!setLabels.count(label) && !mmpLabelNFrame.count(label)){
+		//			mmpLabelNFrame[label] = pBF;
+		//			std::cout << "missing label = " << pIns->mStrLabel <<" "<<label <<" "<<conf << std::endl;
+		//		}
+		//	}
+		//}
+		//std::cout << "asdf test = " << mmpLabelNFrame.size() << std::endl;
+		////현재 프레임에 없는 것 체크하는 코드
 		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
 
 		//BF에서 인스턴스와 레이블 별로 나누기.
 
 		bool bSave = User->mbSave;
+
+		bool bVis = true;
 
 		for (auto pBF : vpBFs) {
 
@@ -1924,7 +1958,128 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 			
 			//std::vector<cv::Point2f> vecDensePrevPoints,vecDenseCurrPoints;
 			//pBF->MatchingFrameWithDenseOF(pNewBF, vecDensePrevPoints, vecDenseCurrPoints, 4);
+			{
+				std::vector<std::pair<int, int>> vecMatches;
+				std::vector<std::pair<cv::Point2f, cv::Point2f>> vecMatchPoints;
+				
+				pBF->MatchingWithFrame(pNewBF, vecMatches);
+				
+				for (auto pair : vecMatches) {
+					int idx1 = pair.first;
+					int idx2 = pair.second;
 
+					auto pt1 = pBF->mvKeyDatas[idx1].pt;
+					auto pt2 = pNewBF->mvKeyDatas[idx2].pt;
+					vecMatchPoints.push_back(std::make_pair(pt2, pt1));
+				}
+				
+				//맵포인트 연결
+				auto pKF2 = pBF->mpRefKF;
+				/*for (int i = 0; i < pKF->N; i++) {
+					auto pMPi = pKF->mvpMapPoints.get(i);
+					if (!pMPi || pMPi->isBad())
+						continue;
+					if (!pMPi->IsInKeyFrame(pKF2))
+						continue;
+					auto idx = pMPi->GetIndexInKeyFrame(pKF2);
+					if (idx < 0)
+						continue;
+					vecMatches.push_back(std::make_pair(idx, i));
+
+					cv::Point2f pt1 = pKF->mvKeys[i].pt;
+					cv::Point2f pt2 = pKF2->mvKeys[idx].pt;
+					vecMatchPoints.push_back(std::make_pair(pt1, pt2));
+				}*/
+
+				for (auto pair : vecMatches) {
+					int idx1 = pair.first;
+					int idx2 = pair.second;
+
+					//매칭 된 컨피던스 연결
+					auto pRefConf = pBF->mvpConfLabels[idx1];
+					if (pRefConf)
+						pNewBF->mvpConfLabels[idx2] = pRefConf;
+				}
+
+				//매칭 정보 등록
+				{
+					std::unique_lock<std::mutex> lock(ObjectSLAM::ObjectMapper::mMutexMatches);
+					ObjectSLAM::ObjectMapper::mapKFsMatches[std::make_pair(pKF2->mnId, pKF->mnId)] = vecMatches;
+				}
+
+				//인스턴스 연결
+				ObjectSLAM::InstanceLinker::computeSim(pBF, pNewBF, vecMatches);
+
+
+				//std::cout << "matching test = " << vecMatchPoints.size() << std::endl;
+				cv::Mat resImage;
+				SLAM->VisualizeMatchingImage(resImage, pNewBF->img, pBF->img, vecMatchPoints, User->mapName, 2);
+				/*
+				std::stringstream ss;
+				ss << "../res/matches/kf_" << pNewBF->mnId << "_" << pBF->mnId << ".png";
+				cv::imwrite(ss.str(), resImage);*/
+			}
+
+			{
+				//auto pKF2 = pBF->mpRefKF;
+				//auto pair = std::make_pair(pKF->mnId, pKF2->mnId);
+				//std::vector<std::pair<size_t, size_t>> vecMatches;
+				//SLAM->mpLocalMapper->GetMatches(pKF->mnId, pKF2->mnId, vecMatches);
+				{
+					/*std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairMatches;
+					for (auto pair : vecMatches) {
+						int idx1 = pair.first;
+						int idx2 = pair.second;
+
+						cv::Point2f pt1 = pKF->mvKeys[idx1].pt;
+						cv::Point2f pt2 = pKF2->mvKeys[idx2].pt;
+						vecPairMatches.push_back(std::make_pair(pt1, pt2));
+					}*/
+
+					/*for (int i = 0; i < pKF->N; i++) {
+						auto pMPi = pKF->mvpMapPoints.get(i);
+						if (!pMPi || pMPi->isBad())
+							continue;
+						if (!pMPi->IsInKeyFrame(pKF2))
+							continue;
+						auto idx = pMPi->GetIndexInKeyFrame(pKF2);
+						if (idx < 0)
+							continue;
+
+						vecMatches.push_back(std::make_pair(i, idx));
+
+						cv::Point2f pt1 = pKF->mvKeys[i].pt;
+						cv::Point2f pt2 = pKF2->mvKeys[idx].pt;
+						vecPairMatches.push_back(std::make_pair(pt1, pt2));
+					}*/
+
+					//confidence propagation
+					//std::vector<bool> vbMatches(pKF->N, false);
+					//for (auto pair : vecMatches) {
+					//	int idx1 = pair.first;
+					//	int idx2 = pair.second;
+
+					//	vbMatches[idx1] = true;
+
+					//	//매칭 된 컨피던스 연결
+					//	auto pRefConf = pBF->mvpConfLabels[idx2];
+					//	if (pRefConf)
+					//		pNewBF->mvpConfLabels[idx1] = pRefConf;
+					//}
+					 
+					//cv::Mat resImage;
+					//SLAM->VisualizeMatchingImage(resImage, pNewBF->img, pBF->img, vecPairMatches, User->mapName, 2);
+					/*
+					std::stringstream ss;
+					ss << "../res/matches/kf_" << pNewBF->mnId << "_"<<pBF->mnId<<".png";
+					cv::imwrite(ss.str(), resImage);*/
+				}
+				
+			}
+
+			break;
+
+			if(false)
 			{
 				std::vector<int> idxs;
 				//std::vector<std::pair<int, int>> vecPairPointIdxInBox;
@@ -1934,20 +2089,66 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 				std::map<int, int> mapNewLinkIDs;
 				std::map < std::pair<int, int>, std::pair<int, int>> mapChangedInstance;
 				//std::cout << "test=1" << std::endl;
-				pBF->MatchingWithFrame(pNewBF, idxs, vecPairMatchInstance);
+				std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairVisualizedMatches;
+				pBF->MatchingWithFrame(pNewBF, idxs, vecPairMatchInstance, vecPairVisualizedMatches);
 				//std::cout << "test=2" << std::endl;
 				//ObjectSLAM::InstanceLinker::computeFromOF(pPrevBF, pNewBF, vecPairMatchInstance, mapNewLinkIDs);
 				ObjectSLAM::InstanceLinker::computeFromOF(pBF, pNewBF, vecPairMatchInstance, mapNewLinkIDs, mapChangedInstance);
 				//std::cout << "test=3" << std::endl;
 				//changed pid,cid에 속하는 애들의 pid, idx에 데이터를 지우고
 				//새로운 인스턴스에 추가 해야 함.
-
 				//인스턴스 연결
 				pBF->UpdateInstances(pNewBF, mapChangedInstance);//mapNewLinkIDs
 				//std::cout << "test=4" << std::endl;
 				//조건에 따라서 새로운 인스턴스 생성 및 키포인트에 컨피던스 전파
 				pBF->UpdateInstanceKeyPoints(vecPairMatchInstance, idxs, mapChangedInstance);
 				//std::cout << "test=5" << std::endl;
+				pNewBF->UpdateInstanceKeyPoints(vecPairVisualizedMatches, vecPairMatchInstance, mapChangedInstance);
+				//std::cout << "test=6" << std::endl;
+
+				if (bVis) {
+					bVis = false;
+					cv::Mat resImage;
+					SLAM->VisualizeMatchingImage(resImage, pBF->img, pNewBF->img, vecPairVisualizedMatches, mapName, 2);
+
+					cv::Mat image = pNewBF->img.clone();
+					cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC3);
+					cv::Mat labeled = cv::Mat::zeros(image.size(), CV_8UC1);
+					
+					for (int x = 0; x < image.cols; x++) {
+						for (int y = 0; y < image.rows; y++) {
+							auto pt = cv::Point(x, y);
+							int sid = pNewBF->GetInstance(pt);
+							
+							int label = pNewBF->mmpBBs[sid]->mpConfLabel->label;
+							mask.at<cv::Vec3b>(pt) = SemanticSLAM::SemanticProcessor::SemanticColors[label];
+							labeled.at<uchar>(pt) = label;
+						}
+					}
+					cv::addWeighted(image, 0.3, mask, 0.7, 0.0, image);
+					for (int i = 0; i < vecPairVisualizedMatches.size(); i++) {
+						
+						auto prevpt = vecPairVisualizedMatches[i].first;
+						int pid = pBF->GetInstance(prevpt);
+						auto prevIns = pBF->mmpBBs[pid];
+
+						auto pt = vecPairVisualizedMatches[i].second;
+						int sid = pNewBF->GetInstance(pt);
+						auto pIns = pNewBF->mmpBBs[sid];
+						if (pIns->isFloor())
+							continue;
+						if (pIns->isTable() && !prevIns->isTable())
+							cv::circle(image, pt, 3, cv::Scalar(0,0,0), 1);
+						if(!pIns->isTable())
+							cv::circle(image, pt, 3, cv::Scalar(255, 255, 255), 1);
+					}
+					SLAM->VisualizeImage(mapName, image, 1);
+					std::stringstream ss;
+					ss << "../res/images/" << pNewBF->mnId << "_ins.png";
+					cv::imwrite(ss.str(), image);
+				}
+
+				//break;
 
 				//if (mapChangedInstance.size() > 0) {//
 				//	cv::Mat image = pBF->img.clone();
@@ -2002,26 +2203,28 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 				//	break;
 				//}
 			}
-			if(false)
-			{
-				std::vector<int> idxs;
-				std::vector<std::pair<int, int>> avecPairMatchInstance;
-				std::set<std::pair<int, int>> vecAssignments;
-				std::map<int, int> mapNewLinkIDs;
-				std::map < std::pair<int, int>, std::pair<int, int>> mapChangedInstance;
-				if (pBF->seg.rows == 0 || pBF->seg.cols == 0)
-				{
-					std::cout << "?????????asdfasdfads" <<" "<<pBF->mnId<<" "<< pBF->mpRefKF->mnFrameId << std::endl;
-					continue;
-				}
-				pNewBF->MatchingWithFrame(pBF, idxs, avecPairMatchInstance);
-				ObjectSLAM::InstanceLinker::computeFromOF(pNewBF, pBF, avecPairMatchInstance, mapNewLinkIDs, mapChangedInstance);
-				std::cout << "new bf = " << mapChangedInstance.size() << std::endl;
-				//인스턴스 연결
-				pNewBF->UpdateInstances(pBF, mapChangedInstance);//mapNewLinkIDs
-				//조건에 따라서 새로운 인스턴스 생성 및 키포인트에 컨피던스 전파
-				pNewBF->UpdateInstanceKeyPoints(avecPairMatchInstance, idxs, mapChangedInstance);
-			}
+			
+			//if(false)
+			//{
+			//	std::vector<int> idxs;
+			//	std::vector<std::pair<int, int>> avecPairMatchInstance;
+			//	std::set<std::pair<int, int>> vecAssignments;
+			//	std::map<int, int> mapNewLinkIDs;
+			//	std::map < std::pair<int, int>, std::pair<int, int>> mapChangedInstance;
+			//	if (pBF->seg.rows == 0 || pBF->seg.cols == 0)
+			//	{
+			//		std::cout << "?????????asdfasdfads" <<" "<<pBF->mnId<<" "<< pBF->mpRefKF->mnFrameId << std::endl;
+			//		continue;
+			//	}
+			//	pNewBF->MatchingWithFrame(pBF, idxs, avecPairMatchInstance);
+			//	ObjectSLAM::InstanceLinker::computeFromOF(pNewBF, pBF, avecPairMatchInstance, mapNewLinkIDs, mapChangedInstance);
+			//	std::cout << "new bf = " << mapChangedInstance.size() << std::endl;
+			//	//인스턴스 연결
+			//	pNewBF->UpdateInstances(pBF, mapChangedInstance);//mapNewLinkIDs
+			//	//조건에 따라서 새로운 인스턴스 생성 및 키포인트에 컨피던스 전파
+			//	pNewBF->UpdateInstanceKeyPoints(avecPairMatchInstance, idxs, mapChangedInstance);
+			//}
+
 			/*if (bSave && mapChangedInstance.size() > 0) {
 				cv::Mat image = pBF->img.clone();
 
@@ -2042,14 +2245,44 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 				cv::imwrite(ss.str(), image);
 			}*/
 		}
+		
+		//비어있는 컨피던스 생성 및 전파
+		for (int i = 0; i < pNewBF->N; i++) {
+			auto pConf = pNewBF->mvpConfLabels[i];
+			if (!pConf)
+			{
+				pConf = new EdgeSLAM::SemanticConfLabel();
+				pNewBF->mvpConfLabels[i] = pConf;
+			}
+			auto pt = pKF->mvKeys[i].pt;
+			int sid = pNewBF->GetInstance(pt);
+			auto pIns = pNewBF->mmpBBs[sid];
+			pConf->Update(pIns->mpConfLabel->label, pIns->mpConfLabel->maxConf, pIns->mbIsthing);
+		}
+		
 		//save 용
 		if (bSave && pNewBF) {
 
 			cv::Mat image = pNewBF->img.clone();
 
+			cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC3);
+			cv::Mat labeled = cv::Mat::zeros(image.size(), CV_8UC1);
+
+			for (int x = 0; x < image.cols; x++) {
+				for (int y = 0; y < image.rows; y++) {
+					auto pt = cv::Point(x, y);
+					int sid = pNewBF->GetInstance(pt);
+					int label = pNewBF->mmpBBs[sid]->mpConfLabel->label;
+					mask.at<cv::Vec3b>(pt) = SemanticSLAM::SemanticProcessor::SemanticColors[label];
+					labeled.at<uchar>(pt) = label;
+				}
+			}
+			cv::addWeighted(image, 0.3, mask, 0.7, 0.0, image);
+
 			for (int i = 0; i < pNewBF->N; i++) {
-				auto sid = pNewBF->mvnInsIDs[i];
-				cv::circle(image, pNewBF->mvKeyDatas[i].pt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[sid], -1);
+				auto pConf = pNewBF->mvpConfLabels[i];
+				//auto sid = pNewBF->mvnInsIDs[i];
+				cv::circle(image, pNewBF->mvKeyDatas[i].pt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[pConf->label], -1);
 			}
 
 			/*for (auto pair : pNewBF->mmpBBs) {
@@ -2061,10 +2294,19 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 					cv::circle(image, pIns->mvKeyDatas[i].pt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[sid], -1);
 				}
 			}*/
+			
+			//cv::Mat edgeImg;
+			//cv::cvtCol r(pNewBF->edge, edgeImg, cv::COLOR_GRAY2BGR);
+			////pNewBF->edge.convertTo(edgeImg, CV_8UC3);
+			SLAM->VisualizeImage(mapName, image, 1);
+			
+			
 
-			std::stringstream ss;
-			ss << "../res/images/" << pNewBF->mnId << "_ins.png";
-			cv::imwrite(ss.str(), image);
+			/*{
+				std::stringstream ss;
+				ss << "../res/images/" << pNewBF->mnId << "_label.png";
+				cv::imwrite(ss.str(), labeled);
+			}*/
 		}
 
 		std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
@@ -2086,590 +2328,54 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 	}*/
 	return;
 
-	//이전 프레임과 매칭
-	std::vector<uchar> features_found;
-	std::vector<cv::Point2f> tempMatchingPoints;
-	std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairVisualizedMatches;
-
-	if (pPrevBF) {
-		//tracking
-		//std::cout << "match::1" << std::endl;
-		std::vector<cv::Point2f> vecPrevCorners, vecCurrCorners;
-		std::vector<std::pair<int, int>> vecPairMatchInstance;
-
-		cv::Mat prevGray = pPrevBF->gray.clone();
-		cv::Mat prev = pPrevBF->img.clone();
-		 
-		cv::Mat curr = pNewBF->img.clone();
-		cv::Mat currGray = pNewBF->gray.clone();
-
-		//std::cout << "match::2" << std::endl;
-
-		//에러처리ㄴ
-		//pPrevBF->ConvertInstanceToFrame();
-		std::vector<std::pair<int, int>> vecPairPointIdxInBox;// = pPrevBF->mvPairFrameAndBox;
-		for (int i = 0, N = pPrevBF->mvKeyDatas.size(); i < N; i++) {
-			vecPrevCorners.push_back(pPrevBF->mvKeyDatas[i].pt);
-		}
-		std::cout <<pPrevBF->mnId<<", "<<pNewBF->mnId << " = " << vecPairPointIdxInBox.size() << " " << vecPrevCorners.size() << std::endl;
-		if (vecPrevCorners.size() > 10) {
-			//std::cout << "match::3" << std::endl;
-
-			cv::Mat used = cv::Mat::zeros(prevGray.size(), CV_8UC1);
-
-			std::vector<cv::KeyPoint> tempMatchingPrevKP, tempMatchingCurrKP;
-			cv::Mat tempPrevDesc = cv::Mat::zeros(0, 32, CV_8UC1);
-			//std::cout << "match::3::1::" << prevCorners.size() << std::endl;
-			int win_size = 10;
-			cv::calcOpticalFlowPyrLK(
-				prevGray,                         // Previous image
-				currGray,                         // Next image
-				vecPrevCorners,                     // Previous set of corners (from imgA)
-				vecCurrCorners,                     // Next set of corners (from imgB)
-				features_found,               // Output vector, each is 1 for tracked
-				cv::noArray(),                // Output vector, lists errors (optional)
-				cv::Size(win_size * 2 + 1, win_size * 2 + 1),  // Search window size
-				5,                            // Maximum pyramid level to construct
-				cv::TermCriteria(
-					cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
-					20,                         // Maximum number of iterations
-					0.3                         // Minimum change per iteration
-				)
-			);
-			//std::cout << "match::3::2" << std::endl;
-			//epipolar constraints
-			cv::Mat T1 = pPrevBF->GetPose();
-			cv::Mat T2 = pNewBF->GetPose();
-			cv::Mat R1 = T1.rowRange(0, 3).colRange(0, 3);
-			cv::Mat t1 = T1.rowRange(0, 3).col(3);
-			cv::Mat R2 = T2.rowRange(0, 3).colRange(0, 3);
-			cv::Mat t2 = T2.rowRange(0, 3).col(3);
-			cv::Mat F12 = CommonUtils::Geometry::ComputeF12(R1, t1, R2, t2, pPrevBF->K, pNewBF->K);
-			//std::cout <<"Obj::F=" << F12 << std::endl;
-			//박스와 박스 나누기
-
-			//현재 프레임에 매칭 정보 이동
-
-			//std::cout << "match::4" << std::endl;
-
-			//매칭 정보 박스에 전파
-			//std::vector<std::pair<int, int>> vecCurrPairPointIdxInBox(vecPairPointIdxInBox.size(), std::make_pair(-1,-1));
-			std::vector<int> tempIDXs;
-			int nfound = vecPrevCorners.size();
-			for (int i = 0; i < nfound; ++i) {
-				if (!features_found[i]) {
-					continue;
-				}
-				auto pt = vecCurrCorners[i];
-				//디스크립터 계산 가능한 영역 안의 키포인트 검출
-				if (pt.x < 20 || pt.x >= currGray.cols - 20 || pt.y < 20 || pt.y >= currGray.rows - 20)
-					continue;
-
-				auto prevPt = vecPrevCorners[i];
-
-				auto prevPair = vecPairPointIdxInBox[i];
-				int prevId = prevPair.first;
-				int prevIdx = prevPair.second;
-
-				int tempID = pPrevBF->seg.at<uchar>(prevPt);
-				
-				auto kp = pPrevBF->mmpBBs[prevId]->mvKeyDatas[prevIdx];
-				auto op = pPrevBF->mmpBBs[prevId]->mvpMapDatas.get(prevIdx);
-
-				//epipolar 제약
-				if (!CommonUtils::Geometry::CheckDistEpipolarLine(prevPt, pt, F12, pKF->mvLevelSigma2[kp.octave]))
-					continue;
-
-				//이전 프레임에서 키포인트 정보
-				tempMatchingPrevKP.push_back(kp);
-				tempPrevDesc.push_back(pPrevBF->mmpBBs[prevId]->mDescriptors.row(prevIdx));
-
-				kp.pt = pt;
-				tempMatchingCurrKP.push_back(kp);
-
-				//매칭 결과
-				tempIDXs.push_back(i);
-
-				//인스턴스 연결
-				auto pid = pPrevBF->seg.at<uchar>(prevPt);
-				auto cid = pNewBF->seg.at<uchar>(pt);
-				vecPairMatchInstance.push_back(std::make_pair(prevId, cid));
-
-				//디스크립터 가능한 포인트만 추가하자.
-				//for (int j = 0; j < pNewBF->mvpBBs.size(); j++) {
-				//	auto pCurrBB = pNewBF->mvpBBs[j];
-				//	if (pCurrBB->mRect.contains(pt)) {
-				//		//auto pair1 = std::make_pair()
-				//	}
-				//}
-			}
-
-			//디스크립터 추가
-			cv::Mat tempCurrDesc;
-			SLAM->mpFeatureTracker->computeDescriptor(currGray, tempMatchingCurrKP, tempCurrDesc);
-
-			std::set<std::pair<int, int>> vecAssignments;
-			std::map<int, int> mapNewLinkIDs;
-			std::map < std::pair<int, int>, std::pair<int, int>> mapChangedInstance;
-			//ObjectSLAM::InstanceLinker::computeFromOF(pPrevBF, pNewBF, vecPairMatchInstance, mapNewLinkIDs);
-			ObjectSLAM::InstanceLinker::computeFromMP(pPrevBF, pNewBF, vecPairMatchInstance, mapNewLinkIDs, mapChangedInstance);
-			
-			////누락 인스턴스의 마스크 만드는 과정
-			//instance id가 없는 경우 체크
-			std::map<std::pair<int, int>, std::vector<cv::Point>> mapPrevInsPts, mapCurrInsPts;
-			std::vector<std::vector<cv::Point>> vecPrevInsPoints, vecCurrInsPoints;
-			
-			
-			//변환된 인스턴스에 속하는 포인트 추가
-			for (int i = 0; i < vecPairMatchInstance.size(); i++) {
-				auto pid = vecPairMatchInstance[i].first;
-				auto cid = vecPairMatchInstance[i].second;
-
-				auto pair = std::make_pair(pid, cid);
-
-				if (!mapChangedInstance.count(pair))
-					continue;
-				auto newPair = mapChangedInstance[pair];
-
-				int idx = tempIDXs[i];
-				auto prevPt = cv::Point(vecPrevCorners[idx]);
-				auto currPt = cv::Point(vecCurrCorners[idx]);
-				mapPrevInsPts[newPair].push_back(prevPt);
-				mapCurrInsPts[newPair].push_back(currPt);
-
-			}
-
-			for (auto p : mapChangedInstance) {
-				auto prev = p.first;
-				auto curr = p.second;
-
-				if (mapPrevInsPts[curr].size() > 3) {
-					//std::cout << "test = " << mapPrevInsPts[curr].size() << std::endl;
-					vecPrevInsPoints.push_back(mapPrevInsPts[curr]);
-					vecCurrInsPoints.push_back(mapCurrInsPts[curr]);
-									
-				}
-			}
-			
-			for(int i = 0; i < vecCurrInsPoints.size(); i++){
-				auto pts = vecCurrInsPoints[i];
-				for (int j = 0; j < pts.size(); j++) {
-					cv::circle(curr, pts[j], 3, cv::Scalar(0, 0, 255), 2);
-				}
-			}
-
-			//map->vector로 변환
-			std::vector<std::vector<cv::Point>> prevHull(vecPrevInsPoints.size());
-			std::vector<std::vector<cv::Point>> currHull(vecCurrInsPoints.size());
-
-			//std::cout << "asdfasdf123 = " <<vecPrevInsPoints.size()<<" "<< mapChangedInstance.size() << std::endl;
-			////convexhull
-			//cv::convexHull(vecCurrInsPoints, currHull);
-
-			//std::cout << "asdfasdf456" << std::endl;
-			////draw
-			//for (int i = 0; i < currHull.size(); i++) {
-			//	cv::drawContours(curr, currHull, i, cv::Scalar(255, 0, 0), 2, -1);
-			//}
-			//std::cout << "asdfasdf789" << std::endl;
-			////누락 인스턴스의 마스크 만드는 과정
-
-			//누락된 인스턴스 추가
-			
-			for (auto pair : mapNewLinkIDs) {
-				auto pid = pair.first;
-				auto cid = pair.second;
-
-				ObjectSLAM::SegInstance* prevIns = nullptr;
-				ObjectSLAM::SegInstance* currIns = nullptr;
-				if (!pPrevBF->mmpBBs.count(pid))
-				{
-				}
-				else {
-					prevIns = pPrevBF->mmpBBs[pid];
-				}
-				if (!pNewBF->mmpBBs.count(cid))
-				{
-				}else{
-					currIns = pNewBF->mmpBBs[cid];
-				}
-								
-				if (!pPrevBF->mmpBBs.count(pid))
-				{
-					prevIns = new ObjectSLAM::SegInstance(pPrevBF, pKF->fx, pKF->fy, pKF->cx, pKF->cy, currIns->mnLabel, currIns->mfConfidence, currIns->mbIsthing, User);
-					prevIns->SetPose(pPrevBF->GetPose());
-					pPrevBF->mmpBBs[pid] = prevIns;
-				}
-				if (!pNewBF->mmpBBs.count(cid))
-				{
-					currIns = new ObjectSLAM::SegInstance(pNewBF, pKF->fx, pKF->fy, pKF->cx, pKF->cy, prevIns->mnLabel, prevIns->mfConfidence, prevIns->mbIsthing, User);
-					currIns->SetPose(pNewBF->GetPose());
-					pNewBF->mmpBBs[cid] = currIns;
-				}
-
-				prevIns->UpdateInstance(currIns);
-				currIns->UpdateInstance(prevIns);
-
-				if (prevIns->mnConnected == 1 && currIns->mnConnected == 1) {
-					std::cout << "global instance test = " << std::endl;
-				}
-			
-				//{
-
-				//	//출력 
-				//	//std::cout << "InstanceLinker::Add New Instance " << std::endl;
-				//	//연결된 이전 프레임의 인스턴스 정보 획득
-				//	auto prevIns = pPrevBF->mmpBBs[pid];
-
-				//	//인스턴스 생성
-				//	
-				//	//키포인트 복사
-				//	//mapNewLinkIDs[pid] = cid;
-
-				//	prevIns->UpdateInstance(newIns);
-				//	newIns->UpdateInstance(prevIns);
-
-				//	if ((newIns->mbIsthing && newIns->mnLabel == 60) || (prevIns->mnLabel == 60 && prevIns->mbIsthing) || (newIns->mnLabel == 42) || (prevIns->mnLabel == 42))
-				//		std::cout << "InstanceLinker::Connected::" << newIns->mnConnected << "=" << pNewBF->mnId << " " << pPrevBF->mnId << " ==" << cid << " " << pid << std::endl;
-				//}
-
-			}
-
-
-
-			//맵포인트 출력
-			for (auto pair : mapNewLinkIDs) {
-				int pid = pair.first;
-				int cid = pair.second;
-
-				auto prevIns = pPrevBF->mmpBBs[pid];
-				auto currIns = pNewBF->mmpBBs[cid];
-
-				auto plabel = prevIns->mnLabel;
-				auto pIsthing = prevIns->mbIsthing || (!prevIns->mbIsthing && plabel == 0);
-				
-				auto clabel = currIns->mnLabel;
-				auto cIsthing = currIns->mbIsthing || (!currIns->mbIsthing && clabel == 0);
-
-				bool bPrevTable = (plabel == 60 && pIsthing) || (plabel == 42 && !pIsthing);
-				bool bCurrTable = (clabel == 60 && cIsthing) || (clabel == 42 && !cIsthing);
-
-				bool bPrevFloor = (plabel == 8 || plabel == 43) && !pIsthing;
-				bool bCurrFloor = (clabel == 8 || clabel == 43) && !cIsthing;
-
-				bool bVis = false;
-				cv::Scalar color = cv::Scalar(0,0,0);
-				if (bPrevTable && bCurrTable)
-				{
-					//color
-					bVis = true;
-					color = cv::Scalar(255, 255, 0);
-				}
-				else if (bPrevTable) {
-					bVis = true;
-					color = cv::Scalar(0, 255, 0);
-				}
-				else if (bCurrTable) {
-					bVis = true;
-					color = cv::Scalar(0, 255, 255);
-				}
-				if (pIsthing || cIsthing) {
-					bVis = true;
-				}
-				if (bPrevFloor || bCurrFloor) {
-					bVis = true;
-					color = cv::Scalar(0, 0, 255);
-				}
-				  
-				if (!bVis)
-					continue;
-				for (int i = 0; i < currIns->mvpMapPoints.size(); i++) {
-					auto pMPi = currIns->mvpMapPoints[i];
-					if (!pMPi || pMPi->isBad())
-						continue;
-					int mlabel = pMPi->mpConfLabel->label;
-					if (mlabel == 160 || mlabel == 42 || mlabel == 8 || mlabel == 43) {
-						
-					}
-					auto pt = currIns->mvKeyPoints[i].pt;
-					//cv::circle(curr, pt, 5, color, -1);
-				}
-			}
-
-			for (int i = 0; i < tempIDXs.size(); i++) {
-				int idx = tempIDXs[i];
-				auto prevPt = vecPrevCorners[idx];
-				auto currPt = vecCurrCorners[idx];
-				auto pid = vecPairMatchInstance[i].first;
-				if (!mapNewLinkIDs.count(pid))
-					continue;
-
-				//매칭 포인트 현재 프레임에 추가
-				int cid = mapNewLinkIDs[pid];
-				auto currBB = pNewBF->mmpBBs[cid];
-
-				auto currKP = tempMatchingCurrKP[i];
-				const cv::Mat d = tempCurrDesc.row(i);
-				//currBB->AddData(currKP, d);
-
-				//객체 매칭 시각화
-				auto prevBB = pPrevBF->mmpBBs[pid];
-				if (prevBB->mbIsthing && prevBB->mnLabel != 60) {
-					vecPairVisualizedMatches.push_back(std::make_pair(prevPt, currPt));
-				}
-
-				//테이블 가능성이 있음.
-				//if(currBB->mbIsthing || (!currBB->mbIsthing && currBB->mnLabel == 0))
-				if ((currBB->mnLabel == 60 && currBB->mbIsthing) || (currBB->mnLabel == 42 && !currBB->mbIsthing))
-				{
-					auto color = SemanticSLAM::SemanticProcessor::SemanticColors[cid];
-					//cv::circle(curr, currPt, 5, color, -1);
-				}     
-
-				//if ((prevBB->mbIsthing && prevBB->mnLabel == 60) || (currBB->mnLabel == 60 && currBB->mbIsthing) || (prevBB->mnLabel == 42) || (currBB->mnLabel == 42))
-				//{
-				//	auto color = Semant icSLAM::SemanticProcessor::SemanticColors[cid];
-				//	cv::circle(curr, currPt, 5, color, -1);
-				//	//cv::circle(curr, currPt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[currBB->mnLabel], -1);
-				//}
-			}
-			SLAM->VisualizeImage(mapName, curr, 2);
-			//임시 매칭 시각화
-			/*{
-				for (auto idx : tempIDXs) {
-					auto prev = vecPrevCorners[idx];
-					auto curr = vecCurrCorners[idx];
-
-					int pid = pPrevBF->seg.at<uchar>(prev);
-					int cid = pNewBF->seg.at<uchar>(curr);
-
-					auto pair = std::make_pair(pid, cid);
-					 
-					if (vecAssignments.count(pair))
-					{
-						vecPairVisualizedMatches.push_back(std::make_pair(prev, curr));
-					}
-				}
-			}*/
-			//std::cout << "match::5::" << tempIDXs.size() << std::endl;
-			
-			
-			//calculate descriptor distance
-			std::vector<bool> vbInliers(tempMatchingPrevKP.size(), false);
-			std::map<std::pair<int, int>, int> mapCountMatchBoxAndBox;
-			std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> mapMatchBoxAndBox;
-			std::map<int, int> mapCurrBoxIndex;
-			
-			//삼각화
-			//인스턴스에 포인트 추가
-
-			//인스턴스와 인스턴스 포인터 연결
-
-			//글로벌 인스턴스 관리
-
-			//std::cout << "match::7" << std::endl;
-			//박스와 박스 매칭 
-			/*std::vector<std::pair<int,  int>> vecMaxCountBoxAndBox;
-			for (auto prevPair : pPrevBF->mmpBBs) {
-				int prevId = prevPair.first;
-				std::pair<int, int> max_idx = std::make_pair(-1, -1);
-				int max_val = -1;
-				for (auto currPair : pNewBF->mmpBBs) {
-					int currId = currPair.first;
-					auto matchPair = std::make_pair(prevId, currId);
-					int val = mapCountMatchBoxAndBox[matchPair];
-					if (val > max_val) {
-						max_val = val;
-						max_idx = matchPair;
-					}
-				}
-				if (max_val > 20) {
-					vecMaxCountBoxAndBox.push_back(max_idx);
-				}
-			}*/
-						
-			////임시 막기
-			//triangulation 
-			//for (auto pair : vecMaxCountBoxAndBox) {
-
-			//	std::vector<cv::Point3f> points;
-
-			//	auto vecMatches = mapMatchBoxAndBox[pair];
-			//	auto pB1 = pPrevBF->mmpBBs[pair.first];
-			//	auto pB2 = pNewBF->mmpBBs[pair.second];
-
-			//	std::vector<std::pair<bool, cv::Mat>> vecTriangulated;
-			//	int a = ObjectSLAM::ObjectMapper::TwoViewTriangulation(pB1, pB2, vecMatches, vecTriangulated);
-
-			//	for (int i = 0; i < vecMatches.size(); i++) {
-			//		auto pair = vecTriangulated[i];
-			//		if (!pair.first)
-			//			continue;
-			//		cv::Mat X3D = pair.second;
-
-			//		int i1 = vecMatches[i].first;
-			//		int i2 = vecMatches[i].second;
-			//		auto pNewOP = new ObjectSLAM::ObjectPoint(pB1);
-			//		pNewOP->SetData(X3D);
-			//		pNewOP->SetDescriptor(pB1->mDescriptors.row(i1).clone());
-			//		pB1->mvpMapDatas.update(i1, pNewOP);
-			//		pB2->mvpMapDatas.update(i2, pNewOP);
-			//		//pNewOP->AddObservation(pB1, i1);
-			//	}
-
-			//	//pB2->Init();
-			//	if (!pB1->mpMap) {
-			//		//오브젝트 맵 생성
-			//		//일단 맵포인트만 생성하고 추가하기
-			//		if (a > 20) {
-			//			auto pNewMap = new ObjectSLAM::ObjectMap();
-			//			pB1->mpMap = pNewMap;
-			//			pB2->mpMap = pNewMap;
-			//		}
-			//	}
-			//	else {
-			//		//오브젝트 포즈 추적 및 맵포인트 매칭 성능 확인
-
-			//		//일단 매칭 되면 넘기기
-			//		//오브젝트 맵 추가하기
-
-			//		auto mvpOPs = pB1->mvpMapDatas.get();
-			//		int a = 0;
-			//		for (int i = 0; i < vecMatches.size(); i++) {
-			//			int i1 = vecMatches[i].first;
-			//			int i2 = vecMatches[i].second;
-			//			auto pOP = mvpOPs[i1];
-			//			if (pOP) {
-			//				points.push_back(cv::Point3f(pOP->GetData()));
-			//				pB2->mvpMapDatas.update(i2, pOP);
-			//				a++;
-			//				vecPairVisualizedMatches.push_back(std::make_pair(pB1->mvKeyDatas[i1].pt, pB2->mvKeyDatas[i2].pt));
-			//			}
-			//		}
-			//		if (a > 10) {
-			//			pB2->mpMap = pB1->mpMap;
-			//		}
-			//		//std::cout << "tracking = " <<a++<< std::endl;
-			//	}
-			//}
-
-			//for (auto pair : vecMaxCountBoxAndBox) {
-
-			//	std::vector<cv::Point3f> points;
-
-			//	auto vecMatches = mapMatchBoxAndBox[pair];
-			//	auto pB1 = pPrevBF->mmpBBs[pair.first];
-			//	auto pB2 = pNewBF->mmpBBs[pair.second];
-
-			//	std::vector<std::pair<bool, cv::Mat>> vecTriangulated;
-			//	int a = ObjectSLAM::ObjectMapper::TwoViewTriangulation(pB1, pB2, vecMatches, vecTriangulated);
-
-			//	for (int i = 0; i < vecMatches.size(); i++) {
-			//		auto pair = vecTriangulated[i];
-			//		if (!pair.first)
-			//			continue;
-			//		cv::Mat X3D = pair.second;
-
-			//		int i1 = vecMatches[i].first;
-			//		int i2 = vecMatches[i].second;
-			//		auto pNewOP = new ObjectSLAM::ObjectPoint(pB1);
-			//		pNewOP->SetData(X3D);
-			//		pNewOP->SetDescriptor(pB1->mDescriptors.row(i1).clone());
-			//		pB1->mvpMapDatas.update(i1, pNewOP);
-			//		pB2->mvpMapDatas.update(i2, pNewOP);
-			//		//pNewOP->AddObservation(pB1, i1);
-			//	}
-
-			//	//pB2->Init();
-			//	if (!pB1->mpMap) {
-			//		//오브젝트 맵 생성
-			//		//일단 맵포인트만 생성하고 추가하기
-			//		if (a > 20) {
-			//			auto pNewMap = new ObjectSLAM::ObjectMap();
-			//			pB1->mpMap = pNewMap;
-			//			pB2->mpMap = pNewMap;
-			//		}
-			//	}
-			//	else {
-			//		//오브젝트 포즈 추적 및 맵포인트 매칭 성능 확인
-
-			//		//일단 매칭 되면 넘기기
-			//		//오브젝트 맵 추가하기
-
-			//		auto mvpOPs = pB1->mvpMapDatas.get();
-			//		int a = 0;
-			//		for (int i = 0; i < vecMatches.size(); i++) {
-			//			int i1 = vecMatches[i].first;
-			//			int i2 = vecMatches[i].second;
-			//			auto pOP = mvpOPs[i1];
-			//			if (pOP) {
-			//				points.push_back(cv::Point3f(pOP->GetData()));
-			//				pB2->mvpMapDatas.update(i2, pOP);
-			//				a++;
-			//				vecPairVisualizedMatches.push_back(std::make_pair(pB1->mvKeyDatas[i1].pt, pB2->mvKeyDatas[i2].pt));
-			//			}
-			//		}
-			//		if (a > 10) {
-			//			pB2->mpMap = pB1->mpMap;
-			//		}
-			//		//std::cout << "tracking = " <<a++<< std::endl;
-			//	}
-
-			//	//맵 포인트 생성
-
-			//	//바운딩박스 계산
-			//	
-			//	if (pB1->mbIsthing && points.size() > 10) {
-			//		if (pB1->mnLabel == 60)
-			//			continue;
-			//		auto pOBB = new ObjectSLAM::OrientedBoundingBox();
-			//		std::cout << "1" << std::endl;
-			//		pOBB->calculateOBB(points);
-			//		std::cout << "2" << std::endl;
-			//		pOBB->projectOBBToImage(pKF->K, pKF->mpCamera->D, pKF->GetPose());
-			//		std::cout << "3" << std::endl;
-			//		pOBB->drawProjectedOBB(curr, pOBB->imagePoints);
-			//		std::cout << "4" << std::endl;
-			//	}
-			//}
-			//std::cout << "match::9" << std::endl;
-		}
-
-		//visualization
-
-		//mapping
-
-		//boundingbox
-
-		////매칭 결과 시각화
-		/*cv::Mat resImage;
-		SLAM->VisualizeMatchingImage(resImage, prev, curr, vecPairVisualizedMatches, mapName, 2);*/
+}
+
+void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id){
+	
+	auto User = SLAM->GetUser(user);
+	if (!User)
+		return;
+	User->mnUsed++;
+	if (!ObjSystem->MapObjectDevices.Count(User)) {
+		User->mnUsed--;
+		return;
 	}
+	
+	auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
+	std::string mapName = User->mapName;
+	bool bSave = User->mbSave;
+	bool bVis = User->GetVisID() == 0;
 
-	//instance init
+	auto pNewBF = ObjSystem->MapKeyFrameNBoxFrame.Get(id);//pObjDevice->mpCurrBF;
+	auto pKF = pNewBF->mpRefKF;
 
-	//matching
+	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+	std::stringstream ss;
+	ss << "/Download?keyword=sam2" << "&id=" << id << "&src=" << user;
+	WebAPI API("143.248.6.143", 35005);
+	auto res = API.Send(ss.str(), "");
 
-	//instance update
+	int n2 = res.size();
 
-	//triangulation
+	cv::Mat temp = cv::Mat::zeros(n2, 1, CV_8UC1);
+	std::memcpy(temp.data, res.data(), res.size());
+	cv::Mat labeled = cv::imdecode(temp, cv::IMREAD_GRAYSCALE);
+	pNewBF->mbSam2 = true;
 
-	//frame update
-	//인스턴스 내에 트래킹 되는 포인트가 없으면 추가함.
-
-	auto vpBBs = pNewBF->mvpBBs;
-	for (int i = 0; i < pKF->N; i++)
-	{
-		auto kp = pKF->mvKeys[i];
-		auto pt = kp.pt;
-		int sid = pNewBF->seg.at<uchar>(pt);
-
-		auto pIns = pNewBF->mmpBBs[sid];
-		if (pIns->mvKeyDatas.size() > 100)
-			continue;
-		pIns->AddData(pKF->mvKeys[i], pKF->mDescriptors.row(i));
+	int w = labeled.cols;
+	int h = labeled.rows;
+	cv::Mat segcolor = cv::Mat::zeros(h, w, CV_8UC3);
+	cv::Mat inscolor = cv::Mat::zeros(h, w, CV_8UC3);
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			int label = labeled.at<uchar>(y, x);
+			segcolor.at<cv::Vec3b>(y, x) = SemanticSLAM::SemanticProcessor::SemanticColors[label];
+		}
 	}
-
+	if (bVis) {
+		//SLAM->VisualizeImage(mapName, img, 0);
+		SLAM->VisualizeImage(mapName, segcolor, 1);
+	}
 }
 
 void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
@@ -2690,17 +2396,25 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 	auto pNewBF = ObjSystem->MapKeyFrameNBoxFrame.Get(id);//pObjDevice->mpCurrBF;
 	auto pKF = pNewBF->mpRefKF;
 
+	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
 	std::stringstream ss;
 	ss << "/Download?keyword=detectron" << "&id=" << id << "&src=" << user;
 	WebAPI API("143.248.6.143", 35005);
 	auto res = API.Send(ss.str(), "");
+	
+	std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
+	auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - pNewBF->t_start).count();
+	auto du_down = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+	std::cout << "segmentation = " << du_seg <<", "<<du_down << std::endl;
+
 	int n2 = res.size();
 
 	cv::Mat temp = cv::Mat::zeros(n2, 1, CV_8UC1);
 	std::memcpy(temp.data, res.data(), res.size());
 	cv::Mat labeled = cv::imdecode(temp, cv::IMREAD_GRAYSCALE);
 
-	pNewBF->seg = labeled.clone();
+	pNewBF->InitInstance(labeled);
+	//pNewBF->seg = labeled.clone();
 
 	int min_id = 10000;
 	int max_id = 0;
@@ -2740,7 +2454,7 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 			bool isthing = ((int)sinfos[sid].at<float>(3)) == 1 ? true : false;
 			int label = (int)sinfos[sid].at<float>(1);
 			float conf = sinfos[sid].at<float>(2);
-			auto pBox = new ObjectSLAM::SegInstance(pNewBF, pKF->fx, pKF->fy, pKF->cx, pKF->cy, label, conf, isthing, User);
+			auto pBox = new ObjectSLAM::SegInstance(pNewBF, pKF->fx, pKF->fy, pKF->cx, pKF->cy, label, conf, isthing, User, true);
 			pBox->SetPose(pNewBF->GetPose());
 			pNewBF->mmpBBs[sid] = pBox;
 
@@ -2755,12 +2469,31 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 		//std::cout << "Detectron2::test::" << min_id << ", " << max_id << std::endl;
 	}
 	pNewBF->sinfos = sinfos;
+	pNewBF->mbDetectron2 = true;
+
 
 	int w = labeled.cols;
 	int h = labeled.rows;
 	
 	cv::Mat img = pNewBF->img.clone();
 
+	////마스킹을 위한 에지
+	//cv::Mat blurred;
+	//cv::Mat kernel(2, 2, CV_8U, cv::Scalar(1));
+	//cv::GaussianBlur(pNewBF->gray, blurred, cv::Size(7, 7), 0);
+	//cv::medianBlur(blurred, blurred, 3);
+	////cv::threshold(blurred, blurred, 200, 255, 0);
+	////cv::morphologyEx(blurred, blurred, cv::MORPH_GRADIENT, kernel);
+	////cv::dilate(blurred, pNewBF->edge, kernel, cv::Point(-1, -1), 5);
+	//
+	//pNewBF->edge = blurred.clone();
+	//cv::drawContours()
+	////cv::Canny(blurred, pNewBF->edge, 70, 180);
+	////cv::Canny()
+
+	//std::cout << "detectron2::1" << std::endl;
+
+	//키포인트에 시멘틱 정보 할당.
 	for (int i = 0; i < pKF->N; i++) {
 		
 		int sid = labeled.at<uchar>(pKF->mvKeys[i].pt);
@@ -2770,14 +2503,20 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 		float score = sinfo.at<float>(2);
 		bool isthing = sinfo.at<float>(3) == 1.0 ? true : false;*/
 
-		if(pNewBF->mvLabels[i] == -1)
-			pNewBF->mvLabels[i] = sid;
+		auto pIns = pNewBF->mmpBBs[sid];
+		if(pIns->isTable() || pIns->isFloor())
+		{ 
+			continue;
+		}
+
+		if(pNewBF->mvnInsIDs[i] == -1)
+			pNewBF->mvnInsIDs[i] = sid;
 		else {
 			//비교, 나중에 수정
 		}
 
-		auto pNewIns = pNewBF->mmpBBs[sid];
-		pNewBF->mvpConfLabels[i]->Update(pNewIns->mnLabel, pNewIns->mfConfidence, pNewIns->mbIsthing);
+		//auto pNewIns = pNewBF->mmpBBs[sid];
+		//pNewBF->mvpConfLabels[i]->Update(pNewIns->mnLabel, pNewIns->mfConfidence, pNewIns->mbIsthing);
 
 		//confidence update
 		//EdgeSLAM::SemanticConfidence* conf;
@@ -2845,7 +2584,7 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 		//auto color = SemanticSLAM::SemanticProcessor::SemanticColors[label];
 		//cv::circle(img, pKF->mvKeys[i].pt, 5, color, -1);
 	}
-
+	//std::cout << "detectron2::2" << std::endl;
 	cv::Mat segcolor = cv::Mat::zeros(h, w, CV_8UC3);
 	cv::Mat inscolor = cv::Mat::zeros(h, w, CV_8UC3);
 	for (int y = 0; y < h; y++) {
@@ -2877,7 +2616,7 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 			mapInstances[sid] = pair;
 		}
 	}
-
+	//std::cout << "detectron2::3" << std::endl;
 	//text 출력
 	for (auto pair : mapInstances) {
 		int sid = pair.first;
@@ -2895,13 +2634,25 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 	}
 	//cv::addWeighted(img, 0.5, inscolor, 0.5, 0.0, img);
 
-	
+	//std::cout << "detectron2::4" << std::endl;
 
 	auto pPrevBF = pObjDevice->mpPrevBF;
 	MappingFromSeg(pNewBF, pPrevBF, SLAM, User, pObjDevice, mapName);
+	
+	{
+		pNewBF->mbInitialized = true;
+		pNewBF->mpPrevBF = pObjDevice->mpCurrBF;
+		pObjDevice->mpCurrBF = pNewBF;
+	}
+
+	//여기서 이닛되고 시스템 변경하기.
+
+	//std::cout << "detectron2::5" << std::endl;
 
 	//맵포인트 갱신
 	ObjSystem->UpdateMapPoint(pNewBF);
+
+	//std::cout << "detectron2::6" << std::endl;
 	for (int i = 0; i < pKF->N; i++) {
 		auto pMPi = pKF->mvpMapPoints.get(i);
 		if (!pMPi || pMPi->isBad())
@@ -2912,16 +2663,16 @@ void detectron2(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 	}
 	if (bVis) {
 		SLAM->VisualizeImage(mapName, img, 0);
-		SLAM->VisualizeImage(mapName, inscolor, 1);
+		//SLAM->VisualizeImage(mapName, inscolor, 1);
 	}
 
 	User->mnUsed--;
 
-	if (bSave) {
+	/*if (bSave) {
 		ss.str("");
 		ss << "../res/images/" << id << "_detectron.png";
 		cv::imwrite(ss.str(), segcolor);
-	}
+	}*/
 }
 
 void Segmentation(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
@@ -3393,6 +3144,42 @@ void Segmentation(EdgeSLAM::SLAM* SLAM, std::string user, int id) {
 
 	User->mnUsed--;
 }
+
+void TrackObject(EdgeSLAM::User* User,int id, EdgeSLAM::Frame* frame, const cv::Mat& gray, std::promise<int>* refid) {
+
+	//refid = -1;
+	int rid = -1;
+	if (ObjSystem->MapObjectDevices.Count(User)) {
+		auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
+		auto pKF = User->mpRefKF;
+		if (pKF) {
+
+			if (id == pKF->mnFrameId)
+			{
+				std::cout << "object matching test = " << id << " " << std::endl;
+			}
+
+			if (ObjSystem->MapKeyFrameNBoxFrame.Count(pKF->mnFrameId)) {
+				//refid = pKF->mnFrameId;
+				refid->set_value(pKF->mnFrameId);
+				auto pBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pKF->mnFrameId);
+				std::vector<uchar> vecFounds;
+				std::vector<cv::Point2f> vecCorners;
+				std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairMatches;
+				//auto nres = EdgeSLAM::SearchPoints::SearchByOpticalFlow(frame, User->mpRefKF, gray, pBF->gray, vecFounds, vecCorners);
+
+				ObjectSLAM::ObjectMatchingInfo* pMatches = new ObjectSLAM::ObjectMatchingInfo(id, pKF->mnFrameId);
+				auto nres = ObjectSLAM::ObjectMatcher::SearchByOpticalFlow(frame, pKF, gray, pBF->gray, pMatches);
+				ObjSystem->SetMatchInfo(id, pKF->mnFrameId, pMatches);
+				//std::cout << "object matching test2 = " << id << " " << refid << std::endl;
+
+				rid = pKF->mnFrameId;
+			}
+		}
+	}
+	refid->set_value(rid);
+}
+
 void TrackPLP(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* eSLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
 	//StructOptimization::StructMap* tempMap = (StructOptimization::StructMap*)SLAM->GetMap("testmap");
 	//auto device = tempMap->GetDevice(src);
@@ -3694,6 +3481,12 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	}
 	// 세그멘테이션 결과 확인하기
 
+	
+	std::promise<int> prefid;
+	std::future<int> frefid = prefid.get_future();
+	int refid;
+	POOL->EnqueueJob(TrackObject, User, id, frame, gray, &prefid);
+
 	std::chrono::high_resolution_clock::time_point t_track_start = std::chrono::high_resolution_clock::now();
 	EdgeSLAM::Tracker::Track(POOL, SLAM, id, src, frame, frame_ts);
 	std::chrono::high_resolution_clock::time_point t_track_end = std::chrono::high_resolution_clock::now();
@@ -3706,7 +3499,6 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	bool bCommuTest = User->mbCommuTest;
 	int nContentKFs = User->mnContentKFs;
 	bool bMapping = User->mbMapping;
-
 
 	///LINE TRACKING
 	//SemanticSLAM::LineFrame* pLF = nullptr;
@@ -3844,7 +3636,131 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 	//	}
 	//}
 	///LINE TRACKING
-	
+
+	//인스턴스 전파 테스트
+
+	frefid.wait();
+	refid = frefid.get();
+	std::cout << "object tracking = " <<id<<" " << refid << std::endl;
+	cv::Mat ptdata = cv::Mat::zeros(0, 1, CV_32FC1);
+	{
+		if (ObjSystem->MapObjectDevices.Count(User)) {
+			//auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
+			//auto pKF = User->mpRefKF;
+			//if (pKF) {
+
+			//	if (id == pKF->mnFrameId)
+			//	{
+			//		std::cout << "object matching test = " << id << " " << std::endl;
+			//	}
+
+			//	if (ObjSystem->MapKeyFrameNBoxFrame.Count(pKF->mnFrameId)) {
+			//		auto pBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pKF->mnFrameId);
+			//		std::vector<uchar> vecFounds;
+			//		std::vector<cv::Point2f> vecCorners;
+			//		std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairMatches;
+			//		//auto nres = EdgeSLAM::SearchPoints::SearchByOpticalFlow(frame, User->mpRefKF, gray, pBF->gray, vecFounds, vecCorners);
+
+			//		ObjectSLAM::ObjectMatchingInfo* pMatches = new ObjectSLAM::ObjectMatchingInfo(id, pKF->mnFrameId);
+			//		auto nres = ObjectSLAM::ObjectMatcher::SearchByOpticalFlow(frame, pKF, gray, pBF->gray, pMatches);
+			//		ObjSystem->SetMatchInfo(id, pKF->mnFrameId, pMatches);
+			//		
+			//		
+			//		//BF에 객체가 있는지 체크
+			//		//객체 안에 포인트 매칭 체크
+			//		
+			//		std::map<int, std::vector<cv::Point2f>> mapTemp;
+
+			//		//시각화
+			//		for (int i = 0; i < pMatches->vecFounds.size(); i++)
+			//		{
+			//			if (!pMatches->vecFounds[i])
+			//				continue;
+			//			auto pt = pMatches->vecReferenceCorners[i];
+			//			auto pt1 = pMatches->vecTargetCorners[i];
+			//			int j = 0;
+			//			for (auto pRect : pBF->mvpBBs) {
+			//				j++;
+			//				if(pRect->mRect.contains(pt)){
+			//					vecPairMatches.push_back(std::make_pair(pMatches->vecTargetCorners[i], pMatches->vecReferenceCorners[i]));
+			//					mapTemp[j].push_back(pt1);
+			//					break;
+			//				}
+			//			}
+			//			//vecPairMatches.push_back(std::make_pair(pMatches->vecTargetCorners[i], pMatches->vecReferenceCorners[i]));
+			//		}
+			//		
+			//		//평균 위치 계산.
+			//		
+			//		for (auto pair : mapTemp) {
+			//			auto vecPTs = pair.second;
+			//			int tempN = vecPTs.size();
+			//			cv::Point2f avgPt(0, 0);
+			//			for (auto apt : vecPTs) {
+			//				avgPt.x += apt.x;
+			//				avgPt.y += apt.y;
+			//			}
+			//			avgPt.x /= tempN;
+			//			avgPt.y /= tempN;
+
+			//			cv::Mat temp = cv::Mat::zeros(2, 1, CV_32FC1);
+			//			temp.at<float>(0) = avgPt.x;
+			//			temp.at<float>(1) = avgPt.y;
+			//			ptdata.push_back(temp);
+			//		}
+
+			//		
+
+			//		cv::Mat resImage;
+			//		SLAM->VisualizeMatchingImage(resImage, img, pBF->img, vecPairMatches, User->mapName, nVisID + 1);
+
+			//		//auto du_upload =  Utils::SendData(keyword, src, totaldata, id, received_ts);
+
+			//	}
+			//}
+
+
+			//auto pBF = pObjDevice->mpCurrBF;
+			//if (pBF) { 
+			//	if (!pBF->mbInitialized)
+			//		std::cout << "frame init???" << std::endl;
+			//	
+			//	std::vector<int> vecIns;
+			//	std::vector<cv::Point2f> vecCorners;
+			//	std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairMatches;
+			//	std::map<int, int> mapPair;
+			//	
+			//	pBF->MatchingWithFrame(frame, gray, vecIns, mapPair, vecCorners);
+ 
+			//	//시각화
+			//	cv::Mat objImg = visImg.clone();
+			//	for (int i = 0, N = frame->N; i < N; i+=3) {
+			//		auto pt = frame->mvKeys[i].pt;
+
+			//		int sid = vecIns[i];
+			//		if (sid < 0)
+			//			continue;
+			//		
+			//		cv::circle(objImg, pt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[mapPair[sid]], -1);
+			//		vecPairMatches.push_back(std::make_pair(pt, vecCorners[i]));
+			//	}
+			//	SLAM->VisualizeImage(mapName, objImg, nVisID+1);
+			//	
+			//	///*{
+			//	//	std::stringstream ss;
+			//	//	ss << "../res/images/" << id << "_track.png";
+			//	//	cv::imwrite(ss.str(), objImg);
+			//	//}
+			//	//{
+			//	//	cv::Mat resImage;
+			//	//	SLAM->VisualizeMatchingImage(resImage, img, pBF->img, vecPairMatches, User->mapName, -1);
+			//	//	std::stringstream ss;
+			//	//	ss << "../res/matches/track_" << id << "_"<<pBF->mnId<<".png";
+			//	//	cv::imwrite(ss.str(), resImage);
+			//	//}*/
+			//}
+		}
+	}
 
 	//SemanticSLAM::DynamicTrackingProcessor::ObjectTracking(POOL, SLAM, src, frame, img.clone(), id);
 	/////////////////////로컬 그래프 정보 전송
@@ -3866,25 +3782,38 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 		if (ObjSystem->MapObjectDevices.Count(User)) {
 			auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
 
-			Utils::SendReqMessage("reqdistdepth", tsrc, id);
+			if (ptdata.rows > 0) {
+				//reqest
+				auto sam2key = "reqsam2";
+				auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, received_ts);
+				//std::cout <<id<<" " << ptdata.rows << " " << pBF->mvpBBs.size() << std::endl;
+			}
+
+			//Utils::SendReqMessage("reqdistdepth", tsrc, id);
 			Utils::SendReqMessage("reqdetectron", tsrc, id);
-			Utils::SendReqMessage("reqcotrack", tsrc, id);
-			//Utils::SendReqMessage("RequestObjectDetection", tsrc, id);
+			//Utils::SendReqMessage("reqsam2", tsrc, id);
+			//Utils::SendReqMessage("reqcotrack", tsrc, id);
+			
 			//Utils::SendReqMessage("RequestSegmentation", tsrc, id);
+			std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
-			pObjDevice->mpPrevBF = pObjDevice->mpCurrBF;
 			auto pNewBF = new ObjectSLAM::BoxFrame(id, img.cols, img.rows, User, (BaseSLAM::AbstractPose*)pRefKF->mpCamPose);
+			pNewBF->t_start = start;
 			pNewBF->Copy(frame);
-
 			pNewBF->mpRefKF = pRefKF;
 			pNewBF->img = img.clone();
 			pNewBF->gray = gray.clone();
-			pObjDevice->mpCurrBF = pNewBF;
+
+			//갱신 부분을 초기화루로 변경한다면?
+			//CurrBF를 reference로 이용함.
+			//pObjDevice->mpPrevBF = pObjDevice->mpCurrBF;
+			//pObjDevice->mpCurrBF = pNewBF;
 
 			ObjSystem->MapKeyFrameNBoxFrame.Update(id, pNewBF);
+			Utils::SendReqMessage("RequestObjectDetection", tsrc, id);
 		}
 		
-		//Utils::SendReqMessage("RequestDepth", src, id);
+		//Utils::SendReqMe ssage("RequestDepth", src, id);
 	
 		//쓰레드풀로
 		if(SemanticSLAM::LineProcessor::mbInitMap) {
@@ -4444,6 +4373,7 @@ void TrackWithObjects(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::s
 	//object tracking
 	//POOL->EnqueueJob(SemanticSLAM::DynamicTrackingProcessor::ObjectTracking, POOL, SLAM, src, frame, img.clone(), id);
 	
+	
 	std::chrono::high_resolution_clock::time_point t_track_start = std::chrono::high_resolution_clock::now();
 	EdgeSLAM::Tracker::Track(POOL, SLAM, id, src, frame, ts);
 	std::chrono::high_resolution_clock::time_point t_track_end = std::chrono::high_resolution_clock::now();
@@ -4985,7 +4915,7 @@ int main(int argc, char* argv[])
 
 	WebAPI::ip = ip;
 	WebAPI::port = port;
-
+	WebAPI::Connect();
 	//for (int i = 0; i < 100; i++) {
 	//	{
 	//		std::stringstream ss;
@@ -5066,6 +4996,7 @@ int main(int argc, char* argv[])
 		sendKeywords.push_back("RequestDepth");				pairKeywords.push_back("Depth");
 		sendKeywords.push_back("reqdistdepth");				pairKeywords.push_back("distdepth");
 		sendKeywords.push_back("reqdetectron");				pairKeywords.push_back("detectron");
+		sendKeywords.push_back("reqsam2");				pairKeywords.push_back("sam2");
 		sendKeywords.push_back("reqcotrack");				pairKeywords.push_back("cotrack");
 		//sendKeywords.push_back("MappingResult");			pairKeywords.push_back("NONE");
 		sendKeywords.push_back("Content");					pairKeywords.push_back("ContentGeneration");
@@ -5138,6 +5069,7 @@ int main(int argc, char* argv[])
 		receivedKeywords.push_back("Segmentation");
 		receivedKeywords.push_back("distdepth");
 		receivedKeywords.push_back("detectron");
+		receivedKeywords.push_back("sam2");
 		receivedKeywords.push_back("cotrack");
 				
 		receivedKeywords.push_back("DevicePosition");
@@ -5338,6 +5270,9 @@ int main(int argc, char* argv[])
 			if (keyword == "Image") {
 				POOL->EnqueueJob(Track, POOL, SLAM, src, ss.str(), id, ts,ts2);
 				//POOL->EnqueueJob(SemanticSLAM::SemanticProcessor::ObjectTracking, SLAM, src, id);
+			}
+			else if (keyword == "sam2") {
+				POOL->EnqueueJob(sam2, SLAM, src, id);
 			}
 			else if (keyword == "detectron") {
 				/*if (!ObjSystem->MapObjectDevices.Count(User))
