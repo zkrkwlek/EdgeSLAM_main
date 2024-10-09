@@ -1121,9 +1121,12 @@ std::vector<cv::KeyPoint> prevKPs;
 ObjectSLAM::ObjectSLAM *ObjSystem = new ObjectSLAM::ObjectSLAM();
 ConcurrentMap<EdgeSLAM::KeyFrame*, ObjectSLAM::BoxFrame*> AllBoxFrames;
 
-void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const int id, const std::string mapName, ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::InstanceMask* pPrevSegMask, ObjectSLAM::InstanceMask* pCurrSegMask, ObjectSLAM::InstanceMask* pRaft, bool bShow = true)
+//prev와 curr의 instance를 비교
+//seg와 비교 - 이건 항상
+//sam과 비교 - 이건 미싱 오브젝트를 감지하였을 때
+void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const int id, const std::string mapName, ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF, ObjectSLAM::InstanceMask* pPrevSegMask, ObjectSLAM::InstanceMask* pCurrSegMask, ObjectSLAM::InstanceMask* pRaft, bool bShow = true)
 {
-	std::string keyprocess = "AssociateMissingObject2 ";
+	std::string keyprocess = "AssociateMissingObject2 + "+key+" ===";
 	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
 
 	cv::Mat currImg = pNewBF->img.clone();
@@ -1140,11 +1143,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 	cv::Mat aaa = cv::Mat::zeros(h, w, CV_8UC1);
 	cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);
 	
-	/*for (auto pair : pPrevSegMask->instance)
-	{
-		auto aid = pair.first;
-		mapInstance.insert(std::make_pair(aid, aaa.clone()));
-	}*/
+	//raft를 이용해 이전 프레임의 인스턴스 정보를 현재 프레임으로 변경
 	for (int x = 5; x < w2; x++) {
 		for (int y = 5; y < h2; y++) {
 			auto prev = cv::Point2f(x, y);
@@ -1177,6 +1176,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 			//aaa += mapInstance[pid];
 		}
 	}
+
+	//인스턴스의 센터로이드, 바운딩 박스도 플로우를 활용해서 이동
 	for (auto pair : pPrevSegMask->instance)
 	{
 		auto aid = pair.first;
@@ -1192,10 +1193,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 			{
 				auto pt1 = cv::Point2f(pIns->rect.x, pIns->rect.y);
 				auto pt2 = cv::Point2f(pIns->rect.x+ pIns->rect.width, pIns->rect.y + pIns->rect.height);
-				
-				/*if (bShow)
-					std::cout << pt1 << " " << pt2 << std::endl;*/
-		
+
 				cv::Vec<schar, 2> tmp1 = flow.at<cv::Vec<schar, 2>>(pt1 / 4) * 4;
 				cv::Vec<schar, 2> tmp2 = flow.at<cv::Vec<schar, 2>>(pt2 / 4) * 4;
 
@@ -1205,15 +1203,10 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 			}
 		}
 
-		/*std::vector<std::vector<cv::Point>> contours;
-		std::vector<cv::Vec4i> hierarchy;
-
-		int mode = cv::RETR_TREE;
-		int method = cv::CHAIN_APPROX_SIMPLE;
-		cv::findContours(mask, contours, hierarchy, mode, method);
-		std::cout << contours.size() << std::endl;*/
 	}
 	
+	//flow로 변환 된 마스크와 현재 seg의 마스크와 iou 계산.
+	//백그라운드에서 0과 매칭되면 미싱 인스턴스
 	std::set<int> resMatchIns;
 	std::vector<std::pair<int, int>> vecMatchPairs;
 	std::vector<int> vecMissingIds;
@@ -1275,10 +1268,14 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 		currmask += pair.second->mask;
 	}
 	
+	//미싱 된 인스턴스 계산
+	//req 요청
+	//gi 관리 수정 필요
 	ObjectSLAM::InstanceMask* pSamMask = nullptr;
 	if(!pNewBF->mapMasks.Count("missing"))
 	{ 
 		pSamMask = new ObjectSLAM::InstanceMask();
+		pSamMask->id1 = pPrevBF->mnId;
 		pSamMask->id2 = id;
 		pNewBF->mapMasks.Update("missing", pSamMask);
 	}
@@ -1299,8 +1296,37 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 		pIns->mask = mask;
 		pIns->pt = pt;
 		pSamMask->instance[pCurrSegMask->mnMaxId++] = pIns;
+
+		auto pPrevIns = pPrevSegMask->instance[id];
+		if(!pPrevIns->mpGlobal)
+		{
+			pPrevIns->mpGlobal = new ObjectSLAM::GlobalInstance();
+			pPrevIns->mpGlobal->Connect(pPrevBF, id);
+		}
+		pIns->mpGlobal = pPrevIns->mpGlobal;
 	}
-	
+	pSamMask->nTrial++;
+
+	//Global Instance 생성 및 연결
+	for (auto pair : vecMatchPairs) {
+		int id1 = pair.first;
+		int id2 = pair.second;
+
+		if (id1 > 0 || id2 > 0)
+			continue;
+		auto pIns1 = pPrevSegMask->instance[id1];
+		auto pIns2 = pCurrSegMask->instance[id2];
+
+		if (!pIns1->mpGlobal)
+		{
+			//생성
+			pIns1->mpGlobal = new ObjectSLAM::GlobalInstance();
+			pIns1->mpGlobal->Connect(pPrevBF, id1);
+		}
+		pIns2->mpGlobal = pIns1->mpGlobal;
+		pIns2->mpGlobal->Connect(pNewBF, id2);
+	}
+
 	if(bShow){
 
 		std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairVisualizedMatches;
@@ -1324,215 +1350,6 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string user, const
 		auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 		std::cout << keyprocess << "== " << id << " == " << du_seg <<" "<< mapInstance.size() << std::endl;
 	}
-}
-
-void AssociateMissingObject(EdgeSLAM::SLAM* SLAM,const std::string user, const int id, const std::string mapName, ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::InstanceMask* pPrevSegMask, ObjectSLAM::InstanceMask* pCurrSegMask, ObjectSLAM::InstanceMask* pRaft, bool bShow = true) 
-{
-	std::string keyprocess = "AssociateMissingObject ";
-	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
-
-	cv::Mat currImg = pNewBF->img.clone();
-	std::map<int, int> mapPrevCount, mapCurrCount;
-	std::map<std::pair<int, int>, int> mapOverlapCount;
-	std::map<int, cv::Mat> mapPrevMissingInstanceMask, mapCurrMissingInstanceMask;
-	std::map<int, std::vector<cv::Point2f>> mapPrevMissingPoints, mapCurrMissingPoints;
-	//cv::Mat iou_matrix = cv::Mat::zeros(pPrevSegMask->info.size() + 1, pCurrSegMask->info.size() + 1, CV_32SC1);
-	
-	int w = currImg.cols;
-	int h = currImg.rows;
-	int w2 = w - 5;
-	int h2 = h - 5;
-	const cv::Mat flow = pRaft->mask;
-	
-	//std::cout << "asso::1 " << std::endl;
-	for (int x = 5; x < w2; x++) {
-		for (int y = 5; y < h2; y++) {
-			auto prev = cv::Point2f(x, y);
-
-			//시각화용
-			int sid = pCurrSegMask->mask.at<uchar>(prev);
-			if(sid > 0)
-				currImg.at<cv::Vec3b>(prev) = SemanticSLAM::SemanticProcessor::SemanticColors[sid];
-
-			auto rpt = prev / 4;
-			cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
-
-			if (tmp.val[0] == 0 && tmp.val[1] == 0)
-				continue;
-			cv::Point2f curr(prev.x + tmp.val[0], prev.y + tmp.val[1]);
-
-			if (curr.x < 5 || curr.y < 5 || curr.x > w2 || curr.y > h2)
-				continue;
-
-			auto pid = pPrevSegMask->mask.at<uchar>(prev);
-			auto cid = pCurrSegMask->mask.at<uchar>(curr);
-
-			mapPrevCount[pid]++;
-			mapCurrCount[cid]++;
-
-			auto pair = std::make_pair(pid, cid);
-			//iou_matrix.at<int>(pid, cid)++;
-			mapOverlapCount[pair]++;
-
-			/*if (pid > 0 || cid > 0)
-			{
-
-			}*/
-			if (pid > 0 && cid == 0)
-			{
-				mapPrevMissingPoints[pid].push_back(curr);
-
-				/*if (!mapPrevMissingInstanceMask.count(pid))
-				{
-					mapPrevMissingInstanceMask[pid] = cv::Mat::zeros(pNewBF->img.size(), CV_8UC3);
-				}
-				mapPrevMissingInstanceMask[pid].at<cv::Vec3b>(curr) = cv::Vec3b(255,255,255);*/
-			}
-			/*
-			if (cid > 0 && pid == 0)
-			{
-				currImg.at<cv::Vec3b>(curr) = cv::Vec3b(0, 0, 255);
-			}*/
-		}
-	}
-
-	std::vector<std::pair<int, int>> vecPairPrevInstanceMatches, vecPairCurrInstanceMatches;
-	std::vector<int> vecPrevMissingIDs, vecCurrMissingIDs;
-	/*int maxPrevIns = 0;
-	for (auto pair : pPrevSegMask->info)
-	{
-		int id = pair.first;
-		if (id > maxPrevIns)
-			maxPrevIns = id;
-	}
-	int maxCurrIns = 0;
-	for (auto pair : pCurrSegMask->info)
-	{
-		int id = pair.first;
-		if (id > maxCurrIns)
-			maxCurrIns = id;
-	}*/
-	//std::cout << "asso::2 " << maxPrevIns << " " << pPrevSegMask->mnMaxId << std::endl;
-	
-	cv::Mat aa = cv::Mat::zeros(h, w, CV_8UC1);
-	//for (auto pair : pCurrSegMask->instance)
-	//{
-	//	if (pair.first > 0)
-	//		continue;
-	//	aa += pair.second;
-	//	//std::cout << "1 =" << pair.first << " " << pair.second.size() << " " << aa.size() <<" "<<aa.type()<<" "<<pair.second.type() <<" "<<CV_8UC1<<" "<<CV_8UC3 << std::endl;
-	//}
-
-	cv::Mat ptdata = cv::Mat::zeros(0, 1, CV_32FC1);
-	for (auto ppair : mapPrevCount)
-	{
-		auto pid = ppair.first;
-		auto pcount = ppair.second;
-
-		if (pid == 0)
-			continue;
-
-		int maxCount = 0;
-		int maxLabel = 0;
-
-		for (auto cpair : mapCurrCount)
-		{
-			auto cid = cpair.first;
-			auto ccount = cpair.second;
-
-			int count = mapOverlapCount[std::make_pair(pid, cid)];
-			if (count > maxCount)
-			{
-				maxCount = count;
-				maxLabel = cid;
-			}
-		}
-		
-		if (maxCount > 10)
-		{
-			int ccount = mapCurrCount[maxLabel];
-			auto pair = std::make_pair(pid, maxLabel);
-			int count = mapOverlapCount[pair];
-			float ratio = ((float)count) / (pcount + ccount - count);
-			float pratio = ((float)count) / pcount;
-			if (maxLabel == 0 && pratio > 0.5)
-			{
-				vecPrevMissingIDs.push_back(pid);
-				/*std::cout << "missing object" << std::endl;
-
-				std::cout << "missing object asdf" << std::endl;*/
-
-				int min_x = 10000;
-				int min_y = 10000;
-				int max_x = 0;
-				int max_y = 0;
-
-				int nid = pCurrSegMask->mnMaxId;
-				pCurrSegMask->info[nid] = pPrevSegMask->info[pid];
-
-				for (auto pt : mapPrevMissingPoints[pid])
-				{
-					//이전 프레임에 세그멘테이션 인스턴스로 추가
-					//currImg.at<cv::Vec3b>(pt) = SemanticSLAM::SemanticProcessor::SemanticColors[nid];
-					cv::circle(currImg, pt, 3, SemanticSLAM::SemanticProcessor::SemanticColors[nid], 2);
-					pCurrSegMask->mask.at<uchar>(pt) = nid;
-					//rect update and sam2
-					if (pt.x < min_x)
-						min_x = pt.x;
-					if (pt.x > max_x)
-						max_x = pt.x;
-					if (pt.y < min_y)
-						min_y = pt.y;
-					if (pt.y > max_y)
-						max_y = pt.y;
-				}
-
-				//pCurrSegMask->info[pCurrSegMask->mnMaxId] = std::mair_pair()
-
-				//rect
-				cv::Rect rect(cv::Point2f(min_x, min_y), cv::Point2f(max_x, max_y));
-				pCurrSegMask->rect[nid] = rect;
-				cv::rectangle(aa, rect, cv::Scalar(0,0,0), 2);
-
-				//SAM2 요청용 박스ㄴ
-				cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
-				temp.at<float>(0) = min_x;
-				temp.at<float>(1) = min_y;
-				temp.at<float>(2) = max_x;
-				temp.at<float>(3) = max_y;
-				ptdata.push_back(temp);
-
-				//label
-				
-				pCurrSegMask->mnMaxId++;
-			}
-			/*if (ratio > 0.3)
-			{
-				vecPairPrevInstanceMatches.push_back(std::make_pair(i, maxLabel));
-				if (maxLabel == 0)
-				{
-					currImg(mapPrevMissingInstanceMask[i]) = cv::Vec3b(255, 0, 0);
-				}
-			}*/
-		}
-	}
-	//if (ptdata.rows > 0) {
-	//	//reqest
-	//	std::string tsrc = user + ".Image";
-	//	auto sam2key = "reqsam2";
-	//	auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, 0.0);
-	//}
-	//std::cout << "asso::3" << std::endl;
-
-	std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
-	auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
-	if(bShow)
-		std::cout << keyprocess << "== "<< " == " << du_seg << std::endl;
-
-	
-	
-
-	//SLAM->VisualizeImage(mapName, aa, 2); //currImg
 }
 
 void MaskMerging(EdgeSLAM::SLAM* SLAM, EdgeSLAM::User* User, ObjectSLAM::BoxFrame* pNewBF, std::string key1, std::string key2, int id) {
@@ -3030,7 +2847,6 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
 	auto pPrevBF = ObjSystem->MapKeyFrameNBoxFrame.Get(id2);
 	auto pPrevKF = pPrevBF->mpRefKF;
 
-
 	ObjectSLAM::InstanceMask* pPrevYoloMask = nullptr;
 	if (pPrevBF->mapMasks.Count("yolo")) {
 		//std::cout << "fail yolo " << id2 << std::endl;
@@ -3075,68 +2891,59 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
 			bAsso = true;
 			//std::cout << "success asso in raft" << id << std::endl;
 			//AssociateMissingObject(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSegMask, pCurrSegMask, pRaftMask);
-			AssociateMissingObject2(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSegMask, pCurrSegMask, pRaftMask, false);
+			AssociateMissingObject2(SLAM, "seg", id, mapName, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, false);
 		}
 
 		if (pPrevBF->mapMasks.Count("sam2"))
 		{
 			pPrevSam2 = pPrevBF->mapMasks.Get("sam2");
 		}
-		else {
-			
-		}
-		if (!pPrevSam2)
+
+		bool bProSam2 = false;
+		ObjectSLAM::InstanceMask* pPrevMissing = nullptr;
+		if (pPrevBF->mapMasks.Count("missing"))
 		{
-			if (pPrevBF->mapMasks.Count("missing"))
-			{
-				auto pTempMask = pPrevBF->mapMasks.Get("missing");
-				pTempMask->id1 = id;
-				if (pTempMask->instance.size() > 0)
-					std::cout << "fail sam2 in raft " << id <<"  "<< pTempMask->instance.size() << std::endl;
+			pPrevMissing = pPrevBF->mapMasks.Get("missing");
+			if (pPrevMissing->instance.size() > 0){
+				bProSam2 = true;
+				if(!pPrevSam2)
+					std::cout << "fail sam2 in raft " << id << "  " << pPrevMissing->instance.size() << std::endl;
+				if (pPrevSam2 && !pPrevSam2->bInit)
+				{
+					pPrevSam2->bInit = true;
+					bAsso = true;
+					//std::cout << "asso sam2 in raft " << id << std::endl;
+					AssociateMissingObject2(SLAM, "sam", id, mapName, pNewBF, pPrevBF, pPrevSam2, pCurrSegMask, pRaftMask, false);
+				}
 			}
-		}
-		if (pPrevSam2 && !pPrevSam2->bInit)
-		{
-			pPrevSam2->bInit = true;
-			bAsso = true;
-			std::cout << "asso sam2 in raft " << id << std::endl;
-			AssociateMissingObject2(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSam2, pCurrSegMask, pRaftMask);
 		}
 		
 		if (pNewBF->mapMasks.Count("missing")) {
 			auto pSamMask = pNewBF->mapMasks.Get("missing");
-			bool bSAM = false;
-			if (!pPrevBF->mapMasks.Count("missing")) {
-				bSAM = true;
-			}
-			if (pPrevSam2 && pPrevSam2->bInit)
-			{
-				bSAM = true;
-			}
-			bool bSEG = false;
-			if (pPrevSegMask && pPrevSegMask->bInit)
-			{
-				bSEG = true;
-			}
 
-			if (bSAM && bSEG && pSamMask->bRequest)
+			if (bProSam2)
+				pSamMask->nMaxTrial = 2;
+
+			if (pSamMask->nTrial >= pSamMask->nMaxTrial)
 			{
-				std::cout << "Request SAM2 = " << id <<" "<<pSamMask->instance.size() << std::endl;
-				pSamMask->bRequest = false;
-				for (auto pair : pSamMask->instance)
+				bool bReqSam2 = pSamMask->instance.size() > 0;
+				if (bReqSam2)
 				{
-					auto rect = pair.second->rect;
-					cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
-					temp.at<float>(0) = rect.x;
-					temp.at<float>(1) = rect.y;
-					temp.at<float>(2) = rect.x + rect.width;
-					temp.at<float>(3) = rect.y + rect.height;
-					ptdata.push_back(temp);
+					//std::cout << "Request SAM2 = " << id << " " << pSamMask->instance.size() << std::endl;
+					pSamMask->bRequest = false;
+					for (auto pair : pSamMask->instance)
+					{
+						auto rect = pair.second->rect;
+						cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
+						temp.at<float>(0) = rect.x;
+						temp.at<float>(1) = rect.y;
+						temp.at<float>(2) = rect.x + rect.width;
+						temp.at<float>(3) = rect.y + rect.height;
+						ptdata.push_back(temp);
+					}
 				}
-				std::cout << "req end = " << id << std::endl;
 			}
 		}
-
 	}
 	else {
 		//std::cout << "fail seg in raft " << id << std::endl;
@@ -3242,6 +3049,8 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 	cv::Mat bmask = cv::imdecode(temp, cv::IMREAD_GRAYSCALE); //새로운 라벨값에 맞게 조정 필요
 	pNewBF->mbSam2 = true;
 
+	auto pPrevBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pMask->id1);
+
 	double minVal, maxVal;
 	cv::minMaxLoc(bmask, &minVal, &maxVal);
 
@@ -3264,18 +3073,18 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 	}
 		
 	//미싱의 라벨값으로 샘2 결과를 변경해야 함.
+	//prev의 연결 안된 객체를 sam으로 curr에 연결함.(curr에 인스턴스를 추가하는 것)
 	ObjectSLAM::InstanceMask* pNewMask = new ObjectSLAM::InstanceMask();
 	pNewMask->mask = cv::Mat::zeros(bmask.size(), CV_8UC1);
 	for (auto pair1 : pMask->instance) {
 		auto pIns = pair1.second;
 		cv::rectangle(aa, pIns->rect, cv::Scalar(255), 2);
+
 		cv::Mat mask1 = pair1.second->mask;
-		float area1 = (float)cv::countNonZero(mask1);
 
 		for (auto pair2 : mapInstances) {
 			
 			cv::Mat mask2 = pair2.second->mask;
-			float area2 = (float)cv::countNonZero(mask2);
 
 			cv::Mat overlap = mask2 & mask1;
 			cv::Mat total = mask2 | mask1;
@@ -3284,7 +3093,6 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 			float nUnion = (float)cv::countNonZero(total);
 
 			float iou = nOverlap / nUnion;
-			float iou2 = nOverlap / area1;
 						
 			if (nOverlap > 0 && iou > 0.5) {
 				int newid = pair1.first;
@@ -3294,6 +3102,9 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 				pIns->mask = mask2;
 				pNewMask->instance[newid] = pIns;
 				pNewMask->mask += (mask2 / 255) * newid;
+
+				//global instance 연결
+				pIns->mpGlobal->Connect(pNewBF, newid);
 				break;
 			}
 		}
@@ -3457,13 +3268,6 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 				
 				auto rect = cv::boundingRect(contours[maxidx]);
 
-				/*cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
-				temp.at<float>(0) = rect.x;
-				temp.at<float>(1) = rect.y;
-				temp.at<float>(2) = rect.x + rect.width;
-				temp.at<float>(3) = rect.y + rect.height;
-				ptdata.push_back(temp);*/
-
 				//pMask->instance[id]
 				cv::drawContours(curr, contours, maxidx, cv::Scalar(255, 255, 0), 2);
 				cv::circle(curr, mc[maxidx], 3, cv::Scalar(0, 0, 255), 3, -1);
@@ -3481,6 +3285,7 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 
 			}
 		}
+		//백그라운드, 스태틱, 인식이 안된 애들
 		auto pIns = new ObjectSLAM::Instance();
 		pIns->mask = pMask->mask == 0;
 		pMask->instance.insert(std::make_pair(0, pIns));
@@ -3510,7 +3315,7 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			{
 				bAsso = true;
 				pPrevSeg->bInit = true;
-				AssociateMissingObject2(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSeg, pMask, pRaft, false);
+				AssociateMissingObject2(SLAM, "seg", id, mapName, pNewBF, pPrevBF, pPrevSeg, pMask, pRaft, false);
 			}
 
 			ObjectSLAM::InstanceMask* pPrevSam2 = nullptr;
@@ -3518,63 +3323,50 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			{
 				pPrevSam2 = pPrevBF->mapMasks.Get("sam2");
 			}
-			else {
-				
-			}
-			if (!pPrevSam2)
-			{
-				if (pPrevBF->mapMasks.Count("missing")) {
-					auto pTempMask = pPrevBF->mapMasks.Get("missing");
-					pTempMask->id1 = id;
-					if(pTempMask->instance.size() > 0)
-						std::cout << "fail sam2 in seg " << id <<"  " << pTempMask->instance.size() << std::endl;
+			bool bProSam2 = false;
+			ObjectSLAM::InstanceMask* pPrevMissing = nullptr;
+			if (pPrevBF->mapMasks.Count("missing")) {
+				pPrevMissing = pPrevBF->mapMasks.Get("missing");
+				if (pPrevMissing->instance.size() > 0)
+				{
+					bProSam2 = true;
+					if (!pPrevSam2)
+						std::cout << "fail sam2 in seg " << id << "  " << pPrevMissing->instance.size() << std::endl;
+					if (pPrevSam2 && !pPrevSam2->bInit)
+					{
+						pPrevSam2->bInit = true;
+						bAsso = true;
+						//std::cout << "asso sam2 in seg " << id << std::endl;
+						AssociateMissingObject2(SLAM,"sam", id, mapName, pNewBF, pPrevBF, pPrevSam2, pMask, pRaft, false);
+					}
 				}
-			}
-			if (pPrevSam2 && !pPrevSam2->bInit)
-			{
-				pPrevSam2->bInit = true;
-				bAsso = true;
-				//std::cout << "asso sam2 in seg " << id << std::endl;
-				AssociateMissingObject2(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSam2, pMask, pRaft);
+				
 			}
 
 			if (pNewBF->mapMasks.Count("missing")) {
 				auto pSamMask = pNewBF->mapMasks.Get("missing");
-				bool bSAM = false;
-				if (!pPrevBF->mapMasks.Count("missing")) {
-					bSAM = true;
-				}
-				else {
-					auto pTempMask = pPrevBF->mapMasks.Get("missing");
-					if (pTempMask->instance.size() == 0)
-						bSAM = true;
-				}
 
-				if (pPrevSam2 && pPrevSam2->bInit)
-				{
-					bSAM = true;
-				}
-				bool bSEG = false;
-				if (pPrevSeg && pPrevSeg->bInit)
-				{
-					bSEG = true;
-				}
+				if(bProSam2)
+					pSamMask->nMaxTrial = 2;
 
-				if (bSAM && bSEG && pSamMask->bRequest)
+				if (pSamMask->nTrial >= pSamMask->nMaxTrial)
 				{
-					std::cout << "Request SAM2 = " << id <<" " << pSamMask->instance.size() << std::endl;
-					pSamMask->bRequest = false;
-					for (auto pair : pSamMask->instance)
+					bool bReqSam2 = pSamMask->instance.size() > 0;
+					if (bReqSam2)
 					{
-						auto rect = pair.second->rect;
-						cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
-						temp.at<float>(0) = rect.x;
-						temp.at<float>(1) = rect.y;
-						temp.at<float>(2) = rect.x + rect.width;
-						temp.at<float>(3) = rect.y + rect.height;
-						ptdata.push_back(temp);
+						//std::cout << "Request SAM2 = " << id << " " << pSamMask->instance.size() << std::endl;
+						pSamMask->bRequest = false;
+						for (auto pair : pSamMask->instance)
+						{
+							auto rect = pair.second->rect;
+							cv::Mat temp = cv::Mat::zeros(4, 1, CV_32FC1);
+							temp.at<float>(0) = rect.x;
+							temp.at<float>(1) = rect.y;
+							temp.at<float>(2) = rect.x + rect.width;
+							temp.at<float>(3) = rect.y + rect.height;
+							ptdata.push_back(temp);
+						}
 					}
-					std::cout << "req end = " << id << std::endl;
 				}
 			}
 		}
@@ -6511,7 +6303,7 @@ int main(int argc, char* argv[])
 				POOL->EnqueueJob(raft, SLAM, src, id);
 			}
 			else if (keyword == "sam2") {
-				POOL->EnqueueJob(sam2, SLAM, src, id, true);
+				POOL->EnqueueJob(sam2, SLAM, src, id, false);
 			}
 			else if (keyword == "yoloseg") {
 				POOL->EnqueueJob(yoloseg, SLAM, keyword, src, id);
