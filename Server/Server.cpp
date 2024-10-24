@@ -198,6 +198,11 @@ bool bSaveVOLatency = false;
 std::string volatencyPath;
 bool bSaveTrajectory = false;
 std::string trajectoryPath;
+int nNumDevice = 1;
+bool bSaveSegLatency = false;
+std::string deepkey1 = "a";
+std::string deepkey2 = "b";
+std::string deepkey3 = "c";
 
 bool consoleHandler(int signal) {
 	
@@ -1118,13 +1123,14 @@ std::vector<cv::KeyPoint> prevKPs;
 //test object optical flow
 
 //정말 박스만 생성하고 넘기기
-ObjectSLAM::ObjectSLAM *ObjSystem = new ObjectSLAM::ObjectSLAM();
+ObjectSLAM::ObjectSLAM* ObjSystem = nullptr;
+
 ConcurrentMap<EdgeSLAM::KeyFrame*, ObjectSLAM::BoxFrame*> AllBoxFrames;
 
 //prev와 curr의 instance를 비교
 //seg와 비교 - 이건 항상
 //sam과 비교 - 이건 미싱 오브젝트를 감지하였을 때
-void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const int id, const std::string mapName, ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF, ObjectSLAM::InstanceMask* pPrevSegMask, ObjectSLAM::InstanceMask* pCurrSegMask, ObjectSLAM::InstanceMask* pRaft, bool bShow = true)
+void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSLAM, const std::string key, const int id, const std::string mapName, ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF, ObjectSLAM::InstanceMask* pPrevSegMask, ObjectSLAM::InstanceMask* pCurrSegMask, ObjectSLAM::InstanceMask* pRaft, bool bShow = true)
 {
 	std::string keyprocess = "AssociateMissingObject2 + "+key+" ===";
 	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
@@ -1135,53 +1141,51 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 	int w2 = w - 5;
 	int h2 = h - 5;
 	const cv::Mat flow = pRaft->mask;
-
-	std::map<int, cv::Point2f> mapCenteroid;
-	std::map<int, cv::Mat> mapInstance;
-	std::map<int, ObjectSLAM::Instance*> mapPrevInstance;
+		
+	std::map<int, ObjectSLAM::Instance*> mapRaftInstance, mapPrevInstance;
 
 	cv::Mat vres = cv::Mat::zeros(h, w, CV_8UC1);
 	cv::Mat vraft = cv::Mat::zeros(h, w, CV_8UC1);
 	cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);
 	
+	auto pKF = pNewBF->mpRefKF;
+
 	int inc = 3;
 	auto pPrevIns = pPrevSegMask->instance.Get();
 
+	//라프트를 이용해 이전 프레임의 마스크 이동 + 추가로, 바운딩 박스와 센터까지 이동
 	for (auto pair : pPrevIns)
 	{
 		int sid = pair.first;
-		/*if (sid == 0)
-			continue;*/
+		if (sid == 0)
+			continue;
 		auto p = pair.second;
 		auto rect = p->rect;
 		int rx = rect.x + rect.width;
 		int ry = rect.y + rect.height;
-
-		int x = rect.x;
-		int y = rect.y;
-
-		/*if (rx > w2)
-			rx = w2;
-		if (ry > h2)
-			ry = h2;
 		
-		if (x < 5)
-			x = 5;
-		if (y < 5)
-			y = 5;*/
+		if (rx > w)
+			rx = w;
+		if (ry > h)
+			ry = h;
 		
 		cv::Mat mask = cv::Mat::zeros(h, w, CV_8UC1);
-		for (int x = rect.x; x < rx; x++)
+		for (int x = std::max(0,rect.x); x < rx; x++)
 		{
-			for (int y = rect.y; y < ry; y++) {
+			for (int y = std::max(0,rect.y); y < ry; y++) {
 				auto prev = cv::Point2f(x, y);
 
 				if (!p->mask.at<uchar>(prev))
 					continue;
 
 				auto rpt = prev / 4;
+				if (rpt.x < 0 || rpt.x >= flow.cols || rpt.y < 0 || rpt.y >= flow.rows)
+				{
+					std::cout << "rect err" << rpt << flow.size() << std::endl;
+					continue;
+				}
 				cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
-
+				 
 				if (tmp.val[0] == 0 && tmp.val[1] == 0)
 					continue;
 				cv::Point2f curr(prev.x + tmp.val[0], prev.y + tmp.val[1]);
@@ -1190,100 +1194,94 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 				mask.at<uchar>(curr) = 255;
 			}
 		}
-		
-		mapInstance.insert(std::make_pair(sid, mask));
+
+		auto pRaftIns = new ObjectSLAM::Instance();
+		pRaftIns->mask = mask.clone();
 		mapPrevInstance[sid] = pair.second;
-		
-		auto rpt = p->pt / 4;
-		cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
-		mapCenteroid[sid] = cv::Point2f(p->pt.x + tmp.val[0], p->pt.y + tmp.val[1]);
 
-		/*if(sid > 0)
-			vraft += mask;*/
+		////contour로 rect, pt, rrect 계산
+		//std::vector<std::vector<cv::Point>> contours;
+		//std::vector<cv::Vec4i> hierarchy;
+
+		//int mode = cv::RETR_EXTERNAL;//RETR_TREE;
+		//int method = cv::CHAIN_APPROX_SIMPLE;//CHAIN_APPROX_SIMPLE;
+		//cv::findContours(mask, contours, hierarchy, mode, method);
+
+		//if (contours.size() > 0)
+		//{
+		//	if (cv::contourArea(contours[0]) > 100) {
+		//		pRaftIns->contour = contours[0];
+
+		//		cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);;
+		//		cv::drawContours(newmask, contours, 0, cv::Scalar(255, 255, 255), -1);
+		//		pRaftIns->mask = newmask.clone();
+		//		pRaftIns->area = cv::countNonZero(newmask);
+		//		pRaftIns->rect = cv::boundingRect(contours[0]);
+		//		pRaftIns->rrect = cv::fitEllipse(contours[0]);
+
+		//		cv::Moments mu = moments(contours[0], true);
+		//		pRaftIns->pt = cv::Point2f(static_cast<float>(mu.m10 / (mu.m00 + 1e-5)),
+		//			static_cast<float>(mu.m01 / (mu.m00 + 1e-5)));
+		//	}
+		//}
+
+		if (sid > 0)
+		{
+			auto rpt = p->pt / 4;
+			cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
+			pRaftIns->pt = cv::Point2f(p->pt.x + tmp.val[0], p->pt.y + tmp.val[1]);
+
+			/*auto rrect = p->rrect;
+			rrect.center -= p->pt;
+			rrect.center += pRaftIns->pt;
+			pRaftIns->rrect = rrect;*/
+			////cv::ellipse(vres, rrect, cv::Scalar(255), 2);
+
+			auto rect = p->rect;
+			rect.x -= p->pt.x;
+			rect.x += pRaftIns->pt.x;
+			rect.y -= p->pt.y;
+			rect.y += pRaftIns->pt.y;
+			pRaftIns->rect = rect;
+			pRaftIns->area = p->area;
+			cv::rectangle(vres, rect, cv::Scalar(125), 2);
+
+			//{
+			//	//check rectangle point
+			//	auto pt1 = cv::Point2f(rect.x, rect.y);
+			//	auto pt2 = cv::Point2f(rect.x + rect.width, rect.y + rect.height);
+
+			//	if (pt1.x <= inc)
+			//		pt1.x = inc;
+			//	if (pt1.x >= w - inc)
+			//		pt1.x = w - inc;
+			//	if (pt1.y <= inc)
+			//		pt1.y = inc;
+			//	if (pt1.y >= h - inc)
+			//		pt1.y = h - inc;
+
+			//	if (pt2.x <= inc)
+			//		pt2.x = inc;
+			//	if (pt2.x >= w - inc)
+			//		pt2.x = w - inc;
+			//	if (pt2.y <= inc)
+			//		pt2.y = inc;
+			//	if (pt2.y >= h - inc)
+			//		pt2.y = h - inc;
+
+			//	cv::Vec<schar, 2> tmp1 = flow.at<cv::Vec<schar, 2>>(pt1 / 4) * 4;
+			//	cv::Vec<schar, 2> tmp2 = flow.at<cv::Vec<schar, 2>>(pt2 / 4) * 4;
+
+			//	auto npt1 = cv::Point2f(pt1.x + tmp1.val[0], pt1.y + tmp1.val[1]);
+			//	auto npt2 = cv::Point2f(pt2.x + tmp2.val[0], pt2.y + tmp2.val[1]);
+			//	pRaftIns->rect = cv::Rect(npt1, npt2);
+
+			//}
+		}
+
+		//rect, rrect를 회전이동만 할 수 있을까?
+		mapRaftInstance[sid] = pRaftIns;
 	}
-
-	////raft를 이용해 이전 프레임의 인스턴스 정보를 현재 프레임으로 변경
-	////마스크는 겹치는 애들 때문에 문제이긴 함.
-	//for (int x = 5; x < w2; x++) {
-	//	for (int y = 5; y < h2; y++) {
-	//		auto prev = cv::Point2f(x, y);
-
-	//		//시각화용
-	//		int sid = pCurrSegMask->mask.at<uchar>(prev);
-	//		if (sid > 0)
-	//			currImg.at<cv::Vec3b>(prev) = SemanticSLAM::SemanticProcessor::SemanticColors[sid];
-
-	//		auto rpt = prev / 4;
-	//		cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
-
-	//		if (tmp.val[0] == 0 && tmp.val[1] == 0)
-	//			continue;
-	//		cv::Point2f curr(prev.x + tmp.val[0], prev.y + tmp.val[1]);
-
-	//		if (curr.x < 5 || curr.y < 5 || curr.x > w2 || curr.y > h2)
-	//			continue;
-
-	//		auto pid = pPrevSegMask->mask.at<uchar>(prev);
-	//		if (pid == 0)
-	//			continue;
-	//		if (!pPrevSegMask->instance.Count(pid))
-	//			continue;
-	//		auto pIns = pPrevSegMask->instance.Get(pid);
-	//		if(!pIns->mask.at<uchar>(prev))
-	//			continue;
-
-	//		newmask.at<uchar>(curr) = pid;
-	//		//mapInstance[pid].at<uchar>(curr) = 255;
-	//		//aaa += mapInstance[pid];
-	//	}
-	//}
-
-	////인스턴스의 센터로이드, 바운딩 박스도 플로우를 활용해서 이동
-	//for (auto pair : pPrevIns)
-	//{
-	//	auto aid = pair.first;
-	//	cv::Mat mask = newmask == aid;
-	//	mapInstance.insert(std::make_pair(aid, mask));
-	//	mapPrevInstance[aid] = pair.second;
-	//	if (aid > 0) {
-	//		auto pIns = pair.second;
-	//		auto rpt = pIns->pt / 4;
-	//		cv::Vec<schar, 2> tmp = flow.at<cv::Vec<schar, 2>>(rpt) * 4;
-	//		mapCenteroid[aid] = cv::Point2f(pIns->pt.x + tmp.val[0], pIns->pt.y + tmp.val[1]);
-
-	//		{
-	//			//check rectangle point
-	//			auto pt1 = cv::Point2f(pIns->rect.x, pIns->rect.y);
-	//			auto pt2 = cv::Point2f(pIns->rect.x+ pIns->rect.width, pIns->rect.y + pIns->rect.height);
-
-	//			if (pt1.x <= inc)
-	//				pt1.x = inc;
-	//			if (pt1.x >= w - inc)
-	//				pt1.x = w - inc;
-	//			if (pt1.y <= inc)
-	//				pt1.y = inc;
-	//			if (pt1.y >= h - inc)
-	//				pt1.y = h - inc;
-
-	//			if (pt2.x <= inc)
-	//				pt2.x = inc;
-	//			if (pt2.x >= w - inc)
-	//				pt2.x = w - inc;
-	//			if (pt2.y <= inc)
-	//				pt2.y = inc;
-	//			if (pt2.y >= h - inc)
-	//				pt2.y = h - inc;
-
-	//			cv::Vec<schar, 2> tmp1 = flow.at<cv::Vec<schar, 2>>(pt1 / 4) * 4;
-	//			cv::Vec<schar, 2> tmp2 = flow.at<cv::Vec<schar, 2>>(pt2 / 4) * 4;
-
-	//			auto npt1 = cv::Point2f(pt1.x + tmp1.val[0], pt1.y + tmp1.val[1]);
-	//			auto npt2 = cv::Point2f(pt2.x + tmp2.val[0], pt2.y + tmp2.val[1]);
-	//			mapRects[aid] = cv::Rect(npt1, npt2);
-	//		}
-	//		vraft += mask;
-	//	}
-	//}
 	
 	//flow로 변환 된 마스크와 현재 seg의 마스크와 iou 계산.
 	//백그라운드에서 0과 매칭되면 미싱 인스턴스
@@ -1294,11 +1292,12 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 
 	auto pCurrSegInstance = pCurrSegMask->instance.Get();
 
-	for (auto pair1 : mapInstance) {
+	for (auto pair1 : mapRaftInstance) {
 		int id1 = pair1.first;
 		if (id1 == 0)
 			continue;
-		float area1 = (float)cv::countNonZero(pair1.second);
+		const cv::Mat pmask = pair1.second->mask;
+		float area1 = (float)cv::countNonZero(pmask);
 
 		for (auto pair2 : pCurrSegInstance) {
 			int id2 = pair2.first;
@@ -1306,7 +1305,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 				continue;
 			const cv::Mat mask = pair2.second->mask;
 
-			cv::Mat overlap = pair1.second & mask;
+			cv::Mat overlap = pmask & mask;
 			float nOverlap = (float)cv::countNonZero(overlap);
 
 			//겹치는게 없으면 무시
@@ -1320,7 +1319,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 			}
 			if (id2 > 0)
 			{
-				cv::Mat total = pair1.second | mask;
+				cv::Mat total = pmask | mask;
 				float nUnion = (float)cv::countNonZero(total);
 				iou = nOverlap / nUnion;
 			}
@@ -1337,7 +1336,9 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 					vecMissingIds.push_back(id1);
 				}
 				else {
+
 					//vres += pair1.second;
+					pair2.second->mbMatched = true;
 					resMatchIns.insert(id2);
 					vecMatchPairs.push_back(std::make_pair(id1, id2));
 				}
@@ -1375,6 +1376,33 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 		}
 	}
 	
+	//Global Instance 생성 및 연결
+	for (auto pair : vecMatchPairs) {
+		int id1 = pair.first;
+		int id2 = pair.second;
+
+		if (id1 > 0 || id2 > 0)
+			continue;
+		auto pIns1 = pPrevSegMask->instance.Get(id1);
+		auto pIns2 = pCurrSegMask->instance.Get(id2);
+
+		if (!pIns1->mpGlobal)
+		{
+			//생성
+			pIns1->mpGlobal = new ObjectSLAM::GlobalInstance();
+			pIns1->mpGlobal->Connect(pPrevBF, id1);
+		}
+		pIns2->mpGlobal = pIns1->mpGlobal;
+		pIns2->mpGlobal->Connect(pNewBF, id2);
+	}
+
+	//현재 프렝미의 인스턴스 중에서 매칭이 안된 애들을 이전 프레임 집합에서 찾기
+	//1) 새로운 글로벌 인스턴스 생성
+	//2) 프레임을 벗어났던 인스턴스 연결
+	std::vector<cv::Point2f> vecPoints;
+	//ObjectSLAM::InstanceLinker::FindInstances(pNewBF, resMatchIns, vecPoints, true);
+	//ObjectSLAM::InstanceLinker::LinkNeighBFs(pNewBF, resMatchIns, true);
+
 	cv::Mat currmask = cv::Mat::zeros(h, w, CV_8UC1);
 	for (auto pair : pCurrSegInstance) {
 		if (pair.first == 0)
@@ -1405,57 +1433,25 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 	//다시 말하면, previous segmentation에서 플로우를 따라서 변화된 위치이기에 기존 정보와는 다름.
 	//다만, id를 이용해서 미싱 정보에 인스턴스와 이전 프레임에 인스턴스가 같다는 것을 알려줌.
 	for (auto mid : vecMissingIds) {
-		auto mask = mapInstance[mid];
-		auto pt = mapCenteroid[mid];
-		
-		auto pIns = new ObjectSLAM::Instance();
-		pIns->mask = mask;
-		pIns->pt = pt;
-		pSamMask->instance.Update(mid, pIns);
-
-		/*auto pPrevIns = pPrevSegMask->instance[id];
-		if(!pPrevIns->mpGlobal)
-		{
-			pPrevIns->mpGlobal = new ObjectSLAM::GlobalInstance();
-			pPrevIns->mpGlobal->Connect(pPrevBF, id);
-		}
-		pIns->mpGlobal = pPrevIns->mpGlobal;*/
-
-		vres += mask * 0.25;
+		auto pRaftIns = mapRaftInstance[mid];
+		pSamMask->instance.Update(mid, pRaftIns);
+		vres += pRaftIns->mask * 0.25;
 	}
 	
 
 	//매칭 안된 이전 프레임 인스턴스 표현
-	for (auto pair : mapInstance){
+	for (auto pair : mapRaftInstance){
 		int id = pair.first;
 		if (id == 0)
 			continue;
 		if (setPrev.count(id))
 			continue;
-		vres += pair.second * 0.5;
+		vres += pair.second->mask * 0.5;
 	}
 
 	pSamMask->nTrial++;
 
-	//Global Instance 생성 및 연결
-	for (auto pair : vecMatchPairs) {
-		int id1 = pair.first;
-		int id2 = pair.second;
-
-		if (id1 > 0 || id2 > 0)
-			continue;
-		auto pIns1 = pPrevSegMask->instance.Get(id1);
-		auto pIns2 = pCurrSegMask->instance.Get(id2);
-
-		if (!pIns1->mpGlobal)
-		{
-			//생성
-			pIns1->mpGlobal = new ObjectSLAM::GlobalInstance();
-			pIns1->mpGlobal->Connect(pPrevBF, id1);
-		}
-		pIns2->mpGlobal = pIns1->mpGlobal;
-		pIns2->mpGlobal->Connect(pNewBF, id2);
-	}
+	
 
 	//시각화 관련
 	if(true){
@@ -1465,7 +1461,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 			int id1 = pair.first;
 			int id2 = pair.second;
 
-			auto pt1 = mapCenteroid[id1];
+			auto pt1 = mapRaftInstance[id1]->pt;
 			auto pt2 = pCurrSegInstance[id2]->pt;
 			vecPairVisualizedMatches.push_back(std::make_pair(pt1, pt2));
 		}
@@ -1483,20 +1479,37 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 
 		//seg와 raft 저장
 		std::stringstream ss;
-		ss.str("");
+		/*ss.str("");
 		ss << "../res/asso/" << id << "_1seg_"<<pPrevBF->mnId<<".png";
-		cv::imwrite(ss.str(), vres);
+		cv::imwrite(ss.str(), vres);*/
 		 
 		/*ss.str("");
 		ss << "../res/asso/" << id << "_0raft.png";
 		cv::imwrite(ss.str(), vraft);*/
 		
-		ss.str("");
+		/*ss.str("");
 		ss << "../res/asso/" << id << "_3seg.png";
-		cv::imwrite(ss.str(), currmask);
+		cv::imwrite(ss.str(), currmask);*/
 
 		cv::Mat resImage;
 		cv::cvtColor(currmask, currmask, cv::COLOR_GRAY2BGR);
+
+		///최종 테스트 시각화
+		for (auto sid : resMatchIns)
+		{
+			auto pIns = pCurrSegInstance[sid];
+			cv::circle(currmask, pIns->pt, 10, cv::Scalar(255, 0, 255), -1);
+		}
+		for (auto pt : vecPoints)
+		{
+			cv::circle(currmask, pt, 10, cv::Scalar(255, 0, 0), -1);
+		}
+		
+		for (auto idx : pCurrSegInstance[0]->setKPs)
+		{
+			cv::circle(currmask, pKF->mvKeys[idx].pt, 5, cv::Scalar(0, 255, 0), -1);
+		}
+
 		cv::cvtColor(vres, vres, cv::COLOR_GRAY2BGR);
 		SLAM->VisualizeMatchingImage(resImage, vres, currmask, vecPairVisualizedMatches, mapName, 2);
 	}
@@ -1504,7 +1517,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, const std::string key, const 
 	if (bShow){
 		std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
 		auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
-		std::cout << keyprocess << "== " << id << " == " << du_seg <<" "<< mapInstance.size() << std::endl;
+		std::cout << keyprocess << "== " << id << " == " << du_seg <<" "<< mapRaftInstance.size() << std::endl;
 	}
 }
 
@@ -2938,7 +2951,17 @@ void MappingFromSeg(ObjectSLAM::BoxFrame* pNewBF, ObjectSLAM::BoxFrame* pPrevBF,
 
 }
 
-void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
+void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id, long long received_ts) {
+	
+	if (bSaveSegLatency)
+	{
+		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+		auto du_latency = (t_start.time_since_epoch().count() - (long long)received_ts) / 1000000.0;
+		auto vec = ObjSystem->MapLatency.Get(deepkey3);
+		vec.push_back(du_latency);
+		ObjSystem->MapLatency.Update(deepkey3, vec);
+	}
+	
 	auto vecstr = split(src, '.');
 	auto user = vecstr[0];
 	int id2 = stoi(vecstr[1]);
@@ -3047,7 +3070,7 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
 			bAsso = true;
 			//std::cout << "success asso in raft" << id << std::endl;
 			//AssociateMissingObject(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSegMask, pCurrSegMask, pRaftMask);
-			AssociateMissingObject2(SLAM, "seg", id, mapName, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, true);
+			AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, false);
 		}
 				
 		if (bAsso && pNewBF->mapMasks.Count("missing")) {
@@ -3116,9 +3139,12 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
 
 	if (ptdata.rows > 0) {
 		//reqest
-		std::string tsrc = user + ".Image";
+		int nobj = ptdata.rows;
+		ptdata.push_back(cv::Mat::zeros(1500 - nobj, 1, CV_32FC1));
+		std::string tsrc = user + ".Image." + std::to_string(nobj);
 		auto sam2key = "reqsam2";
-		auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, 0.0);
+		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+		auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, 15, t_start.time_since_epoch().count());
 	}
 
 	/*cv::Mat resImage;
@@ -3137,8 +3163,17 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id) {
 	User->mnUsed--;
 }
 
-void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
+void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts, bool bShow = true){
 	
+	if (bSaveSegLatency)
+	{
+		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+		auto du_latency = (t_start.time_since_epoch().count() - (long long)received_ts) / 1000000.0;
+		auto vec = ObjSystem->MapLatency.Get(deepkey2);
+		vec.push_back(du_latency);
+		ObjSystem->MapLatency.Update(deepkey2, vec);
+	}
+
 	auto User = SLAM->GetUser(user);
 	if (!User)
 		return;
@@ -3185,7 +3220,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 	//contour - centeroid, rect를 갱신한다면?
 	//sam2
 	cv::Mat vres = cv::Mat::zeros(bmask.size(), CV_8UC1);
-	std::map<int, ObjectSLAM::Instance*> mapInstances;
+	std::map<int, ObjectSLAM::Instance*> mapSamInstances;
 	std::set<int> setNewIDs;
 	int N = (int)maxVal;
 
@@ -3202,57 +3237,127 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 		//contour
 		//rect
 		//pt
-
+		
+		//https://docs.opencv.org/4.x/dd/d49/tutorial_py_contour_features.html
 		std::vector<std::vector<cv::Point>> contours;
 		std::vector<cv::Vec4i> hierarchy;
 
-		int mode = cv::RETR_TREE;
-		int method = cv::CHAIN_APPROX_SIMPLE;
+		int mode = cv::RETR_EXTERNAL;//RETR_TREE;
+		int method = cv::CHAIN_APPROX_SIMPLE;// CHAIN_APPROX_SIMPLE;
 		cv::findContours(amask, contours, hierarchy, mode, method);
-
-		std::vector<cv::Moments> mu(contours.size());
-		std::vector<cv::Point2f> mc(contours.size());
-
+		
 		double max_area = 0;
 		int maxidx = -1;
 
-		for (int i = 0; i < contours.size(); i++)
+		std::vector<cv::Moments> vmu(contours.size());
+		for (int j = 0; j < contours.size(); j++)
 		{
-			mu[i] = moments(contours[i], true);
+			vmu[j] = moments(contours[j], true);
 
-			if (mu[i].m00 < 100)
+			if (vmu[j].m00 < 100)
 				continue;
-			if (max_area < mu[i].m00)
+			if (max_area < vmu[j].m00)
 			{
-				max_area = mu[i].m00;
-				maxidx = i;
+				max_area = vmu[j].m00;
+				maxidx = j;
 			}
-
 		}
+
 		if (maxidx >= 0)
 		{
-
-			mc[maxidx] = cv::Point2f(static_cast<float>(mu[maxidx].m10 / (mu[maxidx].m00 + 1e-5)),
-				static_cast<float>(mu[maxidx].m01 / (mu[maxidx].m00 + 1e-5)));
-
-			auto rect = cv::boundingRect(contours[maxidx]);
+			auto pIns = new ObjectSLAM::Instance();
+			pIns->contour = contours[maxidx];
 
 			cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);;
 			cv::drawContours(newmask, contours, maxidx, cv::Scalar(255, 255, 255), -1);
-
-			auto pIns = new ObjectSLAM::Instance();
 			pIns->mask = newmask.clone();
 			pIns->area = cv::countNonZero(newmask);
-			pIns->rect = rect;
-			pIns->pt = mc[maxidx];
-			mapInstances[i] = pIns;
+			pIns->rect = cv::boundingRect(contours[maxidx]);
+			//pIns->rrect = cv::fitEllipse(contours[0]);
+
+			cv::Moments mu = vmu[maxidx];
+			pIns->pt = cv::Point2f(static_cast<float>(mu.m10 / (mu.m00 + 1e-5)),
+				static_cast<float>(mu.m01 / (mu.m00 + 1e-5)));
+
+			mapSamInstances[i] = pIns;
 		}
+
 	}
-		
+	
+	//현재 프레임의 인스턴스와 샘으로 추가한 인스턴스 비교
+	//샘 인스턴스가 현재 프레임의 0(백그랑운드)과 매칭되면 인스턴스 추가
+	//기존 인스턴스와 매칭되면 그대로 또는 갱신 필요함.
+	//raft로 추가한 마스크가 누락이 있어서 따로 테스트함.
+	//이걸 통해 이전 프레임의 인스턴스와 현재 프레임의 인스턴스가 연결이 되어야 함.
+
+	//***SAM은 prev와 curr 사이를 연결해주어야 함.
+
+	std::set<int> setIns;
+	//for (auto pair1 : mapSamInstances)
+	//{
+	//	auto pSamIns = pair1.second;
+	//	const cv::Mat sammask = pSamIns->mask;
+
+	//	for (auto pair2 : pCurrInstance)
+	//	{
+	//		auto sid = pair2.first;
+	//		auto pSegInstance = pair2.second;
+	//		if (pSegInstance->mbMatched && sid > 0)
+	//			continue;
+
+	//		const cv::Mat segmask = pSegInstance->mask;
+
+	//		cv::Mat overlap = sammask & segmask;
+
+	//		float nOverlap = (float)cv::countNonZero(overlap);
+
+	//		//겹치는게 없으면 무시
+	//		if (nOverlap == 0)
+	//			continue;
+
+	//		float iou = 0.0;
+	//		float th = 0.5;
+
+	//		if (sid == 0)
+	//		{
+	//			iou = nOverlap / pSamIns->area;
+	//		}
+	//		else {
+	//			cv::Mat total = sammask | segmask;
+	//			float nUnion = (float)cv::countNonZero(total);
+	//			iou = nOverlap / nUnion;
+	//		}
+	//		bool bres = false;
+	//		if (iou > th)
+	//		{
+
+	//			//setIns.insert(pair2.first);
+	//			//setNewIDs.insert(newid);
+	//			pSegInstance->mbMatched = true;
+
+	//			bres = true;
+	//			if (sid == 0) {
+
+	//				vres += sammask;
+	//				int newid = ++pCurrSeg->mnMaxId;
+	//				pCurrSeg->instance.Update(newid, pSegInstance);
+	//				pCurrSeg->mask += (sammask / 255) * newid;
+
+	//			}
+	//			else {
+
+	//			}
+	//		}
+	//		if (bres)
+	//		{
+	//			break;
+	//		}
+	//	}
+	//}
+
 	//미싱의 라벨값으로 샘2 결과를 변경해야 함.
 	//prev의 연결 안된 객체를 sam으로 curr에 연결함.(curr에 인스턴스를 추가하는 것)
 	std::vector<ObjectSLAM::Instance*> vecMissingIns;
-	std::set<int> setIns;
 	ObjectSLAM::InstanceMask* pNewMask = new ObjectSLAM::InstanceMask();
 	pNewMask->mask = cv::Mat::zeros(bmask.size(), CV_8UC1);
 	for (auto pair1 : pMissingIns) {
@@ -3264,7 +3369,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 		bool bMissing = true;
 		cv::Mat mask1 = pair1.second->mask;
 
-		for (auto pair2 : mapInstances) {
+		for (auto pair2 : mapSamInstances) {
 			
 			cv::Mat mask2 = pair2.second->mask;
 
@@ -3294,22 +3399,19 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 				{
 					//생성
 					pPrevIns->mpGlobal = new ObjectSLAM::GlobalInstance();
-					pPrevIns->mpGlobal->Connect(pPrevBF, id);
+					pPrevIns->mpGlobal->Connect(pPrevBF, tid);
 				}
 				pIns->mpGlobal = pPrevIns->mpGlobal;
 				pIns->mpGlobal->Connect(pNewBF, newid);
 				break;
 			} 
 		}
-
-		/*if (bMissing) {
-			vres += mask1*0.5;
-		}*/
 	}
+
 	//std::cout << "test sam2 = " << id << " " << pCurrSeg->mnMaxId << " " << pCurrSeg->instance.Size() << std::endl;
 	pNewBF->mapMasks.Update("sam2", pNewMask);
 
-	//mapPoint asso
+	//mapPoint association
 	auto pCurrIns = pCurrSeg->instance.Get();
 	cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);
 	cv::Mat newmask2 = cv::Mat::zeros(h, w, CV_8UC1);
@@ -3326,6 +3428,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 		newmask2 += pair.second->mask;
 	}
 
+	//mp association
 	for (int i = 0; i < pKF->N; i++)
 	{
 		auto pMPi = pKF->mvpMapPoints.get(i);
@@ -3342,21 +3445,21 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 		auto val2 = pCurrSeg->mask.at<uchar>(pt);
 		auto val3 = newmask2.at<uchar>(pt);
 
-		/*if (val1 != val2)
-		{
-			std::cout << "err case = " << id << " " << (int)val1 << " " << (int)val2 <<" "<<(int)val3 << std::endl;
-		}*/
 		pCurrIns[val1]->setMPs.insert(pMPi);
+		pCurrIns[val1]->setKPs.insert(i);
 	}
 
 	//missing instance visualization
-	for (auto pair2 : mapInstances) {
+	for (auto pair2 : mapSamInstances) {
 		int id = pair2.first;
 		if (setIns.count(id))
 			continue;
 		cv::Mat mask2 = pair2.second->mask;
 		vres += mask2 * 0.5;
 	}
+
+	//global에 mp 추가
+	for(auto pair : )
 
 	std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
 	auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
@@ -3397,7 +3500,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 		//SLAM->VisualizeImage(mapName, img, 0);
 		//SLAM->VisualizeImage(mapName, img, 1);
 
-		std::stringstream ss;
+		/*std::stringstream ss;
 		ss.str("");
 		ss << "../res/asso/" << id << "_2sam2.png";
 		cv::imwrite(ss.str(), vres);
@@ -3408,13 +3511,23 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, bool bShow = true){
 
 		ss.str("");
 		ss << "../res/asso/" << id << "_5.png";
-		cv::imwrite(ss.str(), newmask2);
+		cv::imwrite(ss.str(), newmask2);*/
 	}
 
 	User->mnUsed--;
 }
 
-void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id) {
+void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id, long long received_ts, bool bShow = false) {
+	
+	if (bSaveSegLatency)
+	{
+		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+		auto du_latency = (t_start.time_since_epoch().count() - (long long)received_ts) / 1000000.0;
+		auto vec = ObjSystem->MapLatency.Get(deepkey1);
+		vec.push_back(du_latency);
+		ObjSystem->MapLatency.Update(deepkey1, vec);
+	}
+	
 	auto User = SLAM->GetUser(user);
 	if (!User)
 		return;
@@ -3423,6 +3536,12 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 		User->mnUsed--;
 		return;
 	}
+
+	if (bShow)
+	{
+		std::cout << "yoloseg start = " << id << std::endl;
+	}
+
 	auto pObjDevice = ObjSystem->MapObjectDevices.Get(User);
 	std::string mapName = User->mapName;
 	bool bSave = User->mbSave;
@@ -3446,10 +3565,11 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 		info = cv::Mat(res2.size() / 10, 5, CV_16UC1, (void*)res2.data());
 	}
 
-
 	ObjectSLAM::InstanceMask* pMask = new ObjectSLAM::InstanceMask();
 	cv::Mat temp = cv::Mat(res.size(), 1, CV_8UC1, (void*)res.data());
 	pMask->mask = cv::imdecode(temp, cv::IMREAD_GRAYSCALE);
+
+	cv::Mat orimask = pMask->mask.clone();
 
 	int w = pMask->mask.cols;
 	int h = pMask->mask.rows;
@@ -3500,57 +3620,47 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			std::vector<std::vector<cv::Point>> contours;
 			std::vector<cv::Vec4i> hierarchy;
 
-			int mode = cv::RETR_TREE;
-			int method = cv::CHAIN_APPROX_SIMPLE;
+			int mode = cv::RETR_EXTERNAL;//RETR_TREE;
+			int method = cv::CHAIN_APPROX_SIMPLE;//CHAIN_APPROX_SIMPLE;
 			cv::findContours(mask, contours, hierarchy, mode, method);
-
-			std::vector<cv::Moments> mu(contours.size());
-			std::vector<cv::Point2f> mc(contours.size());
 
 			double max_area = 0;
 			int maxidx = -1;
 
+			std::vector<cv::Moments> vmu(contours.size());
 			for (int i = 0; i < contours.size(); i++)
 			{
-				mu[i] = moments(contours[i], true);
+				vmu[i] = moments(contours[i], true);
 
-				if (mu[i].m00 < 100)
+				if (vmu[i].m00 < 100)
 					continue;
-				if (max_area < mu[i].m00)
+				if (max_area < vmu[i].m00)
 				{
-					max_area = mu[i].m00;
+					max_area = vmu[i].m00;
 					maxidx = i;
 				}
-
 			}
-			if(maxidx >= 0)
-			{ 
-				
-				mc[maxidx] = cv::Point2f(static_cast<float>(mu[maxidx].m10 / (mu[maxidx].m00 + 1e-5)),
-					static_cast<float>(mu[maxidx].m01 / (mu[maxidx].m00 + 1e-5)));
-				
-				auto rect = cv::boundingRect(contours[maxidx]);
 
-				//pMask->instance[id]
-				cv::drawContours(curr, contours, maxidx, cv::Scalar(255, 255, 0), 2);
-				cv::circle(curr, mc[maxidx], 3, cv::Scalar(0, 0, 255), 3, -1);
-				cv::rectangle(curr, rect, cv::Scalar(0, 255, 0), 2);
+			if (maxidx >= 0) {
+				auto pIns = new ObjectSLAM::Instance();
+				pIns->contour = contours[maxidx];
+
 				cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);;
 				cv::drawContours(newmask, contours, maxidx, cv::Scalar(255, 255, 255), -1);
-				//cv::cvtColor(newmask, newmask, cv::COLOR_BGR2GRAY);
-				//newmask.convertTo(newmask, CV_8UC1);
-
-				newBackground += (newmask/255*iid);
-
-				auto pIns = new ObjectSLAM::Instance();
 				pIns->mask = newmask.clone();
 				pIns->area = cv::countNonZero(newmask);
-				pIns->rect = rect;
-				pIns->pt = mc[maxidx];
-				pMask->instance.Update(iid, pIns);
+				pIns->rect = cv::boundingRect(contours[maxidx]);
+				//pIns->rrect = cv::fitEllipse(contours[0]);
 
+				cv::Moments mu = vmu[maxidx];
+				pIns->pt = cv::Point2f(static_cast<float>(mu.m10 / (mu.m00 + 1e-5)),
+					static_cast<float>(mu.m01 / (mu.m00 + 1e-5)));
+
+				pMask->instance.Update(iid, pIns);
+				newBackground += (newmask / 255 * iid);
 			}
 		}
+
 		//백그라운드, 스태틱, 인식이 안된 애들
 		//기존 마스크에서 0이 아닌 경우가 있었음.
 		auto pBackIns = new ObjectSLAM::Instance();
@@ -3570,8 +3680,15 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			auto pt = pKF->mvKeys[i].pt;
 			auto sid = pMask->mask.at<uchar>(pt);
 
-			if (pMask->instance.Count(sid))
+			if (pMask->instance.Count(sid)){
 				pInstance[sid]->setMPs.insert(mp);
+				pInstance[sid]->setKPs.insert(i);
+
+				if (pInstance[sid]->mpGlobal)
+				{
+					pInstance[sid]->mpGlobal->AllMapPoints.Update(mp);
+				}
+			}
 			/*else
 				std::cout << "error instance " << (int)sid <<" "<<info.rows<<" "<<pMask->instance.size() << std::endl;*/
 		}
@@ -3582,6 +3699,9 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 		
 		for (auto pair1 : pInstance) {
 			int id1 = pair1.first;
+			if (id1 == 0)
+				continue;
+
 			auto pIns1 = pair1.second;
 			auto rect1 = pIns1->rect;
 			bool bStatic = false;
@@ -3635,7 +3755,7 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			{
 				bAsso = true;
 				pPrevSeg->bInit = true;
-				AssociateMissingObject2(SLAM, "seg", id, mapName, pNewBF, pPrevBF, pPrevSeg, pMask, pRaft, true);
+				AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, pNewBF, pPrevBF, pPrevSeg, pMask, pRaft, false);
 			}
 
 			//request sam2 to restore mask of missing object
@@ -3672,9 +3792,12 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 	//test
 	if (ptdata.rows > 0) {
 		//reqest
-		std::string tsrc = user + ".Image";
+		int nobj = ptdata.rows;
+		ptdata.push_back(cv::Mat::zeros(1500 - nobj, 1, CV_32FC1));
+		std::string tsrc = user + ".Image." + std::to_string(nobj);
 		auto sam2key = "reqsam2";
-		auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, 0.0);
+		std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+		auto du_upload = Utils::SendData(sam2key, tsrc, ptdata, id, 15, t_start.time_since_epoch().count());
 	}
 
 	///////
@@ -3684,29 +3807,23 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 	for (int y = 0; y < h; y++) {
 		for (int x = 0; x < w; x++) {
 			//바닥, 테이블, 벽 등은 스태틱으로 취급 맵포인트만 해도 됨.
-			int sid = pMask->mask.at<uchar>(y, x);
+			int sid = orimask.at<uchar>(y, x);
 			if (sid < 1)
 				continue;
 			auto pt = cv::Point2f(x, y);
-			/*if (mapStaticObject[sid])
-			{
-				segcolor.at<cv::Vec3b>(y, x) = cv::Vec3b(255, 0, 255);
-				cv::rectangle(segcolor, pMask->instance[sid]->rect, cv::Scalar(0, 0, 0), 2);
-			}else*/
 			segcolor.at<cv::Vec3b>(y, x) = SemanticSLAM::SemanticProcessor::SemanticColors[sid];
 		}
 	}
 
-	cv::addWeighted(img, 0.5, segcolor, 0.5, 0.0, img);
+	cv::addWeighted(img, 0.3, segcolor, 0.7, 0.0, img);
 	//시각화
 
 	if (bVis) {
 		SLAM->VisualizeImage(mapName, img, 0);
 
-		std::stringstream ss;
-		ss << "../res/asso/" << id << "_4res1.png";
-		cv::imwrite(ss.str(), img);
-
+		/*std::stringstream ss;
+		ss << "../res/aseg/" << id << ".png";
+		cv::imwrite(ss.str(), img);*/
 	}
 
 	if (false && pPrevBF && pPrevSeg) {
@@ -3735,13 +3852,17 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 		if (bVis) {
 			SLAM->VisualizeImage(mapName, img, 0);
 
-			std::stringstream ss;
+			/*std::stringstream ss;
 			ss << "../res/asso/" << id << "_4res1.png";
-			cv::imwrite(ss.str(), img);
-
+			cv::imwrite(ss.str(), img);*/
 		}
 	}
 	
+	if (bShow)
+	{
+		std::cout << "yoloseg end = " << id << std::endl;
+	}
+
 	User->mnUsed--;
 }
 
@@ -4687,7 +4808,7 @@ void TrackObject(EdgeSLAM::User* User,int id, EdgeSLAM::Frame* frame, const cv::
 
 					}
 					else {
-						std::cout << "track object : fail prev segmentation" << std::endl;
+						//std::cout << "track object : fail prev segmentation" << std::endl;
 						bProcess = false;
 					}
 
@@ -4698,7 +4819,7 @@ void TrackObject(EdgeSLAM::User* User,int id, EdgeSLAM::Frame* frame, const cv::
 					}
 				}
 				else {
-					std::cout << "track object : fail prev box frame" << std::endl;
+					//std::cout << "track object : fail prev box frame" << std::endl;
 					bProcess = false;
 				}
 
@@ -4723,12 +4844,12 @@ void TrackObject(EdgeSLAM::User* User,int id, EdgeSLAM::Frame* frame, const cv::
 				}
 			}
 			else {
-				std::cout << "tarck object : fail find reference box frame" << std::endl;
+				//std::cout << "tarck object : fail find reference box frame" << std::endl;
 			}
 		}
 		else
 		{
-			std::cout << "tarck object : fail find reference keyframe" << std::endl;
+			//std::cout << "tarck object : fail find reference keyframe" << std::endl;
 		}
 	}
 	refid->set_value(rid);
@@ -5273,7 +5394,8 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 			if (pPrevKF) {
 				std::stringstream aass2;
 				aass2 << tsrc << "," << id << "," << pPrevKF->sourceName << ".Image," << pPrevKF->mnFrameId;
-				Utils::SendReqMessage("reqraft", aass2.str(), id);
+				std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+				Utils::SendReqMessage("reqraft", aass2.str(), id, t_start.time_since_epoch().count());
 			}
 
 			//Utils::SendReqMessage("RequestSegmentation", tsrc, id);
@@ -5297,7 +5419,8 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 			pObjDevice->mpCurrBF = pNewBF;
 
 			ObjSystem->MapKeyFrameNBoxFrame.Update(id, pNewBF);
-			Utils::SendReqMessage("reqyoloseg", tsrc, id);
+			std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+			Utils::SendReqMessage("reqyoloseg", tsrc, id, t_start.time_since_epoch().count());
 		}
 	}
 
@@ -5370,7 +5493,7 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 		
 		if (bTrackObject) {
 			cv::Mat resImage;
-			SLAM->VisualizeMatchingImage(resImage, visImg, img2, vecPairMatches, User->mapName, nVisID + 1);
+			//SLAM->VisualizeMatchingImage(resImage, visImg, img2, vecPairMatches, User->mapName, nVisID + 1);
 
 			/*std::stringstream ss;
 			ss.str("");
@@ -5506,8 +5629,8 @@ void Track(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string src, 
 		ss << "../res/images/" << frame->mnFrameID << "_tracking.png";
 		cv::imwrite(ss.str(), visImg);
 	}*/
-
-	SLAM->VisualizeImage(mapName, visImg, nVisID);
+	if(nVisID < 8)
+		SLAM->VisualizeImage(mapName, visImg, nVisID);
 	////시각화 및 칼만필터 적용
 }
 
@@ -6049,6 +6172,16 @@ void parsing(char* argv[], int& index) {
 		std::cout << "latency path = " << latencyPath << std::endl;
 		std::cout << "trajectory path = " << trajectoryPath << std::endl;
 	}
+	else if (keyword == "--semantickeyword")
+	{
+		std::string strNumDevice = argv[index++];
+		nNumDevice = std::stoi(strNumDevice);
+		bSaveSegLatency = true;
+		deepkey1 = std::string(argv[index++])+"_"+strNumDevice;
+		deepkey2 = std::string(argv[index++]) + "_" + strNumDevice;
+		deepkey3 = std::string(argv[index++]) + "_" + strNumDevice;
+		std::cout << deepkey1 << " " << deepkey2 << " " << deepkey3 << std::endl;
+	}
 	else if (keyword == "--netsim") {
 		nNetworkSimul = atoi(argv[index++]);
 		std::cout << "network simulation= " << nNetworkSimul << std::endl;
@@ -6141,6 +6274,16 @@ int main(int argc, char* argv[])
 	SemanticSLAM::ContentProcessor::mbSaveLatency = bSaveVOLatency;
 	SemanticSLAM::LineProcessor::Init();
 	
+	////ObjectSLAM Initialization
+	ObjSystem = new ObjectSLAM::ObjectSLAM();
+	ObjectSLAM::InstanceLinker::SetSystem(ObjSystem);
+	if (bSaveSegLatency) {
+		ObjSystem->mbSaveLatency = true;
+		ObjSystem->MapLatency.Update(deepkey1, std::vector<double>());
+		ObjSystem->MapLatency.Update(deepkey2, std::vector<double>());
+		ObjSystem->MapLatency.Update(deepkey3, std::vector<double>());
+	}
+
 	//StructOptimization::StructMapper::EdgeSLAMSystem = SLAM;
 	//StructOptimization::StructMapper::BaseSLAMSystem = BaseSLAMSystem;
 	SemanticSLAM::SemanticProcessor::BaseSLAMSystem = BaseSLAMSystem;
@@ -6444,13 +6587,22 @@ int main(int argc, char* argv[])
 				//POOL->EnqueueJob(SemanticSLAM::SemanticProcessor::ObjectTracking, SLAM, src, id);
 			}
 			else if (keyword == "raft") {
-				POOL->EnqueueJob(raft, SLAM, src, id);
+				/*std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+				auto du_latency = (t_start.time_since_epoch().count() - (long long)ts) / 1000000.0;
+				std::cout << "test raft latency = " << du_latency << " " << (long long)ts << std::endl;*/
+				POOL->EnqueueJob(raft, SLAM, src, id, ts);
 			}
 			else if (keyword == "sam2") {
-				POOL->EnqueueJob(sam2, SLAM, src, id, false);
+				/*std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+				auto du_latency = (t_start.time_since_epoch().count() - (long long)ts) / 1000000.0;
+				std::cout << "test sam2 latency = " << du_latency <<" "<< (long long)ts << std::endl;*/
+				POOL->EnqueueJob(sam2, SLAM, src, id, ts, false);
 			}
 			else if (keyword == "yoloseg") {
-				POOL->EnqueueJob(yoloseg, SLAM, keyword, src, id);
+				/*std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+				auto du_latency = (t_start.time_since_epoch().count() - (long long)ts) / 1000000.0;
+				std::cout << "test yoloseg latency = " << du_latency << " " << (long long)ts << std::endl;*/
+				POOL->EnqueueJob(yoloseg, SLAM, keyword, src, id, ts, false);
 			}
 			else if (keyword == "detectron") {
 				/*if (!ObjSystem->MapObjectDevices.Count(User))
@@ -6629,6 +6781,16 @@ int main(int argc, char* argv[])
 					
 					if (SLAM->GetConnectedDevice() == 0) {
 						//std::cout << "save start = " << src << std::endl;
+						if (bSaveSegLatency)
+						{
+							/*std::stringstream ss;
+							ss << "../res/" << deepkey1 << ".csv";
+							*/
+							ObjSystem->SaveLatency(deepkey1);
+							ObjSystem->SaveLatency(deepkey2);
+							ObjSystem->SaveLatency(deepkey3);
+						}
+						
 						if (bSaveLatency){
 							std::cout << "save start" << std::endl;
 							//SLAM->Save(latencyPath, SLAM->EvaluationLatency, "num,source,id,quality,download,processing,upload,graph,preprocessing,total,size");
