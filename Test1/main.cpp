@@ -491,6 +491,8 @@ void UpdateLocalContent(float* data) {
 		MatVO.at<float>(2) = -10000;
 	}*/
 
+
+
 	for (int j = 0; j < Ncontent; j++)
 	{
 		int len = (int)data[cidx];
