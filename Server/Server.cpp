@@ -1032,6 +1032,8 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 	User->mnUsed++;
 	//image download
 
+	std::cout << "start" << std::endl;
+
 	std::chrono::high_resolution_clock::time_point t_down_start = std::chrono::high_resolution_clock::now();
 	WebAPI API(ip, port);
 	auto res = API.Send(url, "");
@@ -1104,7 +1106,7 @@ void SimTrack(ThreadPool::ThreadPool* POOL, EdgeSLAM::SLAM* SLAM, std::string sr
 		}
 
 	}
-	
+	std::cout << "end" << std::endl;
 	frame->mnShared--;
 	User->mnUsed--;
 }
@@ -1229,11 +1231,12 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	//flow로 변환 된 마스크와 현재 seg의 마스크와 iou 계산.
 	//백그라운드에서 0과 매칭되면 미싱 인스턴스
 	std::set<int> sAlreadyMatch; //이미 매칭되었기에
-	std::vector<std::pair<int, int>> vecSuccessMatches, vecFailMatches, vecTempMPs;
+	std::vector<std::pair<int, int>> vecTempMPs;
 	
 	//미싱된 오브젝트의 글로벌 아이디를 저장.
 	std::set<int> setMissingGlobal;
 	auto pCurrSegInstance = pCurrSegMask->instance.Get();
+	auto pPrevSegInstance = pPrevSegMask->instance.Get();
 
 	//인스턴스 매칭
 	//이전 프레임의 인스턴스를 현재 프레임의 인스턴스와 매칭
@@ -1295,9 +1298,6 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 					assores->res = false;
 					assores->req = true;
 
-					vecFailMatches.push_back(std::make_pair(id1, 0));
-					pair1.second->mnMatchId = 0;
-
 					if (pPrevGlobal)
 					{
 						setMissingGlobal.insert(pPrevGlobal->mnId);
@@ -1306,12 +1306,9 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 				else {
 
 					assores->res = true;
-
 					//매칭 성공
 					//vres += pair1.second;
 					sAlreadyMatch.insert(id2);
-					pair2.second->mbMatched = true;
-					vecSuccessMatches.push_back(std::make_pair(id1, id2));
 				}
 			}
 			else {
@@ -1362,16 +1359,12 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 
 		if (!bres && bestFailMatch.first > 0)
 		{
+			//raft에서의 에러 또는 마스킹이 작을 때 생김.
+			//확인 상 대부분이 마스킹만 잘되면 동작할 듯.
 			assores->id = bestFailMatch.first;
 			assores->res = false;
 			assores->req = true;
 			assores->iou = bestFailMatch.second;
-
-			//raft에서의 에러 또는 마스킹이 작을 때 생김.
-			//확인 상 대부분이 마스킹만 잘되면 동작할 듯.
-			//vecMissingIds.push_back(id1);
-			vecFailMatches.push_back(std::make_pair(id1, bestFailMatch.first));
-			pair1.second->mnMatchId = (char)bestFailMatch.first;
 		}
 
 		pCurrSegMask->mapResAsso[id1] = assores;
@@ -1388,7 +1381,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	{
 		int pid = pair.first;
 		auto res = pair.second;
-		ObjSystem->vecObjectAssoRes.push_back(res->print(pid));
+		ObjSystem->vecObjectAssoRes.push_back(res->print(pPrevSegInstance[pid],pid));
 	}
 
 	//Global Instance 생성 및 연결
@@ -1396,13 +1389,16 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	//생성이면 두 인스턴스의 맵포인트 추가
 	//연결이면 현재 프레임의 인스턴스만 추가
 	std::set<ObjectSLAM::GlobalInstance*> setTestGlobal;
-	for (auto pair : vecSuccessMatches) {
-		int id1 = pair.first;
-		int id2 = pair.second;
+	//////////////////////////////////////////////////////////////////일단 에러 체크가 필요함(진행중)
+	for (auto pair : pCurrSegMask->mapResAsso)
+	{
+		auto assores = pair.second;
 
-		//왜 이렇게 했었는지 기억이 안남..
-		/*if (id1 > 0 || id2 > 0)
-			continue;*/
+		if (!assores->res)
+			continue;
+		int id1 = pair.first;
+		int id2 = assores->id;
+
 		if (id1 == 0 || id2 == 0)
 		{
 			std::cout << "object matching error????" << std::endl;
@@ -1422,9 +1418,9 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 		pIns2->mpGlobal = pIns1->mpGlobal;
 		pIns2->mpGlobal->Connect(pNewBF, id2);
 		pIns2->mpGlobal->AddMapPoints(pIns2->setMPs);
-		pIns2->mpGlobal->CalculateBoundingBox();
 		setTestGlobal.insert(pIns2->mpGlobal);
 	}
+	//////////////////////////////////////////////////////////////////일단 에러 체크가 필요함(진행중)
 
 	//현재 프렝미의 인스턴스 중에서 매칭이 안된 애들을 이전 프레임 집합에서 찾기
 	//1) 새로운 글로벌 인스턴스 생성
@@ -1455,201 +1451,179 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	//다시 말하면, previous segmentation에서 플로우를 따라서 변화된 위치이기에 기존 정보와는 다름.
 	//다만, id를 이용해서 미싱 정보에 인스턴스와 이전 프레임에 인스턴스가 같다는 것을 알려줌.
 	
-	for (auto pair : vecFailMatches)
+	for (auto pair : pCurrSegMask->mapResAsso)
 	{
-		auto mid = pair.first;
+		auto assores = pair.second;
+		if (assores->res || !assores->req)
+			continue;
+		int mid = pair.first;
+		if (!mapRaftInstance.count(mid))
+			std::cout << "raft error" << std::endl;
 		auto pRaftIns = mapRaftInstance[mid];
 		pSamMask->instance.Update(mid, pRaftIns);
 	}
 
-	//for (auto mid : vecMissingIds) {
-	//	auto pRaftIns = mapRaftInstance[mid];
-	//	pSamMask->instance.Update(mid, pRaftIns);
-	//	vres += pRaftIns->mask * 0.25;
-	//}
-	////매칭 안된 이전 프레임 인스턴스 표현
-	//for (auto pair : mapRaftInstance){
-	//	int id = pair.first;
-	//	if (id == 0)
-	//		continue;
-	//	if (setPrev.count(id))
-	//		continue;
-	//	vres += pair.second->mask * 0.5;
-	//}
-
 	pSamMask->nTrial++;
-
-	
 
 	//시각화 관련
 	if(true){
 
-		std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairVisualizedMatches;
-		for (auto pair : vecSuccessMatches) {
-			int id1 = pair.first;
-			int id2 = pair.second;
-
-			auto pt1 = mapRaftInstance[id1]->pt;
-			auto pt2 = pCurrSegInstance[id2]->pt;
-			vecPairVisualizedMatches.push_back(std::make_pair(pt1, pt2));
-		}
-
-		//test mp 추후 제거
-		/*for (auto pair : vecTempMPs)
+		////시각화
 		{
-			int id1 = pair.first;
-			int id2 = pair.second;
-
-			auto pt1 = mapCenteroid[id1];
-			auto pt2 = pCurrSegMask->instance[id2]->pt;
-			vecPairVisualizedMatches.push_back(std::make_pair(pt1, pt2));
-		}*/
-
-		//seg와 raft 저장
-		std::stringstream ss;
-		/*ss.str("");
-		ss << "../res/asso/" << id << "_1seg_"<<pPrevBF->mnId<<".png";
-		cv::imwrite(ss.str(), vres);*/
-		 
-		/*ss.str("");
-		ss << "../res/asso/" << id << "_0raft.png";
-		cv::imwrite(ss.str(), vraft);*/
-		
-		/*ss.str("");
-		ss << "../res/asso/" << id << "_3seg.png";
-		cv::imwrite(ss.str(), currmask);*/
-		
-		////마스크 출력
-		for (auto pair : pCurrSegMask->mapResAsso) {
-			auto pid = pair.first;
-			auto res = pair.second;
-			auto pIns = mapRaftInstance[pid];
-			if (res->res) {
-				prevmask += pIns->mask;
-			}
-			else if(res->req){
-				prevmask += pIns->mask*0.5;
-			}
-			else {
-				prevmask += pIns->mask*0.25;
-			}
-		}
-		
-		for (auto pair : pCurrSegInstance) {
-			if (pair.first == 0)
+			//현재 인스턴스 기본
+			for (auto pair : pCurrSegInstance) {
+				if (pair.first == 0)
+					continue;
 				currmask += pair.second->mask * 0.5;
-			else{
-				currmask += pair.second->mask;
 			}
-		}
+			
+			//어소시에이션 결과 추가
+			for (auto pair : pCurrSegMask->mapResAsso) {
+				auto pid = pair.first;
+				auto res = pair.second;
+				auto cid = res->id;
+				auto pIns = pPrevSegInstance[pid];
 
-		cv::Mat resImage;
-		cv::cvtColor(prevmask, prevmask, cv::COLOR_GRAY2BGR);
-		cv::cvtColor(currmask, currmask, cv::COLOR_GRAY2BGR);
+				auto bSuccess = res->res;
+				auto bRequest = res->req;
 
-		////id 출력
-		for (auto pair : pCurrSegMask->mapResAsso) {
-			auto pid = pair.first;
-			auto res = pair.second;
-			auto pIns = mapRaftInstance[pid];
-			auto textpt = pIns->pt;
-			cv::putText(prevmask, std::to_string(pair.first), textpt, 2, 1.3, cv::Scalar(255, 0,0),2);
-		}
-		for (auto pair : pCurrSegInstance) {
-			if (pair.first == 0)
-				continue;
-			auto textpt = pair.second->pt;
-			cv::putText(currmask, std::to_string(pair.first), textpt, 2, 1.3, cv::Scalar(255, 0,0),2);
-		}
+				if (!bSuccess)
+				{
+					if (bRequest) {
+						prevmask += pIns->mask * 0.25;
+					}
+					else {
+						prevmask += pIns->mask * 0.5;
+					}
+				}
 
+				if (bSuccess) {
+					auto cIns = pCurrSegInstance[cid];
+					prevmask += pIns->mask;
+					currmask += cIns->mask;
+				}
+			}
+
+			//매칭 성공한 포인트의 위치 추가
+			std::vector<std::pair<cv::Point2f, cv::Point2f>> vecPairVisualizedMatches;
+			for (auto pair : pCurrSegMask->mapResAsso) {
+
+				auto res = pair.second;
+				if (!res->res)
+					continue;
+
+				int id1 = pair.first;
+				int id2 = res->id;
+
+				auto pt1 = pPrevSegInstance[id1]->pt;
+				auto pt2 = pCurrSegInstance[id2]->pt;
+				vecPairVisualizedMatches.push_back(std::make_pair(pt1, pt2));
+			}
+
+			//시각화 이미지
+			cv::Mat resImage;
+			cv::cvtColor(prevmask, prevmask, cv::COLOR_GRAY2BGR);
+			cv::cvtColor(currmask, currmask, cv::COLOR_GRAY2BGR);
+
+			//글로벌 인스턴스 출력
+			{
+				std::set<ObjectSLAM::GlobalInstance*> setGlobalInstances;
+				pPrevBF->GetNeighGlobalInstnace(setGlobalInstances);
+
+				const cv::Mat T = pKF->GetPose();
+				const cv::Mat K = pKF->K.clone();
+				const cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
+				const cv::Mat t = T.rowRange(0, 3).col(3);
+
+				//std::cout << "number of bounding box " << setGlobalInstances.size() << std::endl;
+				for (auto pG : setGlobalInstances) {
+
+					if (setTestGlobal.count(pG))
+						continue;
+					if (pG->mapConnected.Size() <= 2)
+						continue;
+
+					pG->UpdatePosition();
+					auto pt = pG->ProjectPoint(T, K);
+
+					cv::circle(currmask, pt, 5, cv::Scalar(0, 255, 255), 2);
+					cv::putText(currmask, std::to_string(pG->mnId), pt, 2, 1.3, cv::Scalar(255, 255, 0), 2);
+
+					//draw map points
+					auto vecMPs = pG->AllMapPoints.ConvertVector();
+					
+					for (auto pMPi : vecMPs) {
+						if (!pMPi || pMPi->isBad())
+							continue;
+						/*auto idx = pMPi->GetIndexInKeyFrame(pKF);
+						if (idx < 0)
+							continue;*/
+						auto pt = CommonUtils::Geometry::ProjectPoint(pMPi->GetWorldPos(), K, R, t);
+						cv::circle(currmask, pt, 5, SemanticSLAM::SemanticProcessor::SemanticColors[pG->mnId + 1], -1);
+					}
+
+					//draw bounding box
+					/*std::vector<cv::Point2f> vecPoints;
+					pG->CalculateBoundingBox();
+					pG->ProjectBB(vecPoints, K, T);
+					pG->DrawBB(currmask, vecPoints);*/
+				}
+			}
+
+			////id 출력
+			for (auto pair : pCurrSegMask->mapResAsso) {
+				auto pid = pair.first;
+				auto res = pair.second;
+				auto pIns = pPrevSegInstance[pid];
+				auto textpt = pIns->pt;
+				cv::putText(prevmask, std::to_string(pair.first), textpt, 2, 1.3, cv::Scalar(255, 0, 0), 2);
+			}
+			for (auto pair : pCurrSegInstance) {
+				if (pair.first == 0)
+					continue;
+				auto textpt = pair.second->pt;
+				cv::putText(currmask, std::to_string(pair.first), textpt, 2, 1.3, cv::Scalar(255, 0, 0), 2);
+			}
+
+			
+
+			SLAM->VisualizeMatchingImage(resImage, prevmask, currmask, vecPairVisualizedMatches, mapName, 2);
+			{
+				std::stringstream ss;
+				ss.str("");
+				ss << "../res/aaresasso/" << id << "_test.png";
+				cv::imwrite(ss.str(), resImage);
+			}
+			
+		}
 
 		//글로벌 인스턴스 시각화
-		std::set<ObjectSLAM::GlobalInstance*> setGlobalInstances;
-		pPrevBF->GetNeighGlobalInstnace(setGlobalInstances);
-
-		const cv::Mat T = pKF->GetPose();
-		const cv::Mat K = pKF->K.clone();
-
-		//std::cout << "number of bounding box " << setGlobalInstances.size() << std::endl;
-		for (auto pG : setGlobalInstances) {
-			//pG->CalculateBoundingBox();
-			std::vector<cv::Point2f> vecPoints;
-			
-			if (pG->mapConnected.Size() <= 2)
-				continue;
-
-			auto vecMPs = pG->AllMapPoints.ConvertVector();
-			for (auto pMPi : vecMPs) {
-				if (!pMPi || pMPi->isBad())
-					continue;
-				auto idx = pMPi->GetIndexInKeyFrame(pKF);
-				if (idx < 0)
-					continue;
-				//cv::circle(currmask, pKF->mvKeys[idx].pt, 5, SemanticSLAM::SemanticProcessor::SemanticColors[pG->mnId + 1], -1);
-			}
-			
-			//pG->ProjectBB(vecPoints, K, T);
-			//pG->DrawBB(currmask, vecPoints);
-		}
-		//setTestGlobal
-		for (auto pG : setTestGlobal) {
-			//pG->CalculateBoundingBox();
-			std::vector<cv::Point2f> vecPoints;
-			if (pG->mapConnected.Size() <= 2)
-				continue;
-			
-			auto vecMPs = pG->AllMapPoints.ConvertVector();
-			for (auto pMPi : vecMPs) {
-				if (!pMPi || pMPi->isBad())
-					continue;
-				auto idx = pMPi->GetIndexInKeyFrame(pKF);
-				if (idx < 0)
-					continue;
-				//cv::circle(currmask, pKF->mvKeys[idx].pt, 5, SemanticSLAM::SemanticProcessor::SemanticColors[pG->mnId + 1], -1);
-			}
-			
-			//pG->ProjectBB(vecPoints, K, T);
-			//pG->DrawBB(currmask, vecPoints);
-		}
-
-		///최종 테스트 시각화
-		/*for (auto sid : resMatchIns)
+		if(false)
 		{
-			auto pIns = pCurrSegInstance[sid];
-			cv::circle(currmask, pIns->pt, 10, cv::Scalar(255, 0, 255), -1);
-		}*/
-		for (auto pt : vecPoints)
-		{
-			cv::circle(currmask, pt, 10, cv::Scalar(255, 0, 0), -1);
+			
+			//setTestGlobal
+			for (auto pG : setTestGlobal) {
+				
+				
+				if (pG->mapConnected.Size() <= 2)
+					continue;
+
+				auto vecMPs = pG->AllMapPoints.ConvertVector();
+				for (auto pMPi : vecMPs) {
+					if (!pMPi || pMPi->isBad())
+						continue;
+					auto idx = pMPi->GetIndexInKeyFrame(pKF);
+					if (idx < 0)
+						continue;
+					//cv::circle(currmask, pKF->mvKeys[idx].pt, 5, SemanticSLAM::SemanticProcessor::SemanticColors[pG->mnId + 1], -1);
+				}
+				//std::vector<cv::Point2f> vecPoints;
+				//pG->CalculateBoundingBox();
+				//pG->ProjectBB(vecPoints, K, T);
+				//pG->DrawBB(currmask, vecPoints);
+			}
 		}
 		
-		//배경의 맵포인트를 시각화
-		/*for (auto idx : pCurrSegInstance[0]->setKPs)
-		{
-			cv::circle(currmask, pKF->mvKeys[idx].pt, 5, cv::Scalar(0, 255, 0), -1);
-		}*/
-
-		std::vector<std::pair<cv::Point2f, cv::Point2f>> vecFailVisualizedMatches;
-		for (auto pair : vecFailMatches) {
-			int id1 = pair.first;
-			int id2 = pair.second;
-
-			auto pt1 = mapRaftInstance[id1]->pt;
-			auto pt2 = pCurrSegInstance[id2]->pt;
-
-			cv::circle(prevmask, pt1, 10, cv::Scalar(0, 0, 255), -1);
-			cv::circle(currmask, pt2, 10, cv::Scalar(0, 0, 255), -1);
-			vecFailVisualizedMatches.push_back(std::make_pair(pt1, pt2));
-		}
-		
-		SLAM->VisualizeMatchingImage(resImage, prevmask, currmask, vecPairVisualizedMatches, mapName, 2);
-		{
-			std::stringstream ss;
-			ss.str("");
-			ss << "../res/aaresasso/" << id << "_test.png";
-			cv::imwrite(ss.str(), resImage);
-		}
-
 		//cv::Rect uRect(0, 0, w, h);
 		//cv::Rect lRect(0, h, w, h);
 		//SLAM->VisualizeMatchingImage(resImage, resImage(uRect), resImage(lRect), vecPairMatches, User->mapName, 2);
@@ -3430,7 +3404,11 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 			for (int idx = 0; idx < vecMPs.size(); idx++)
 			{
 				auto pMPi = vecMPs[idx];
+				
 				if (!pMPi || pMPi->isBad())
+					continue;
+				auto pt = pKF->mvKeys[idx].pt;
+				if (cv::pointPolygonTest(pIns->contour, pt, false) < 0.0)
 					continue;
 				pIns->setMPs.insert(pMPi);
 				pIns->setKPs.insert(idx);
@@ -3466,35 +3444,56 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	//prev matching
 	//std::map<int, ObjectSLAM::AssoMatchRes> mapResAsso;
 	float th = 0.5;
+	std::set<int> sAlreadyMatch; 
 	for (auto pair1 : mapSamInstances)
 	{
 		auto pSamIns = pair1.second;
 		const cv::Mat sammask = pSamIns->mask;	
 		bool bres = false;
 
-		//ObjectSLAM::AssoMatchRes assores;
-
 		for (auto pair2 : pMissingIns) {
 		
 			auto pM = pair2.second;
 			int pid = pair2.first;
-						//prev matching
+			if (sAlreadyMatch.count(pid))
+				continue;
 			auto pPrevIns = pPrevInstance[pid];
 
 			if(!pCurrSeg->mapResAsso.count(pid))
 				std::cout<<"???????????????errerrerr"<<std::endl;
 			auto assores = pCurrSeg->mapResAsso[pid];
+			
+			if(!assores->req)
+				std::cout << "???????????????errerrerr222222222" << std::endl;
+			//assores->req = false;
+			//assores->iou = 0.0;
+
+			//std::cout <<pNewBF->mnId<<" "<<pPrevBF->mnId<<" == " << pid << " " << assores->id << " " << assores->res << " " << assores->req << std::endl;
 
 			const cv::Mat raftmask = pM->mask;
 
-			cv::Mat overlap = raftmask & sammask;
-			float nOverlap = (float)cv::countNonZero(overlap);
-			float iou = nOverlap / pM->area;
+			float iou = 0.0;
 
-			int cid = pM->mnMatchId;
+			int cid = assores->id;
+			if (cid == 0)
+			{
+				cv::Mat overlap = raftmask & sammask;
+				float nOverlap = (float)cv::countNonZero(overlap);
+				iou = nOverlap / pM->area;
+			}
+			if (cid > 0) {
+				const cv::Mat segmask = pCurrInstance[cid]->mask;
+				cv::Mat overlap = segmask & sammask;
+				cv::Mat total = segmask | sammask;
+				float nOverlap = (float)cv::countNonZero(overlap);
+				float nUnion = (float)cv::countNonZero(total);
+				iou = nOverlap / nUnion;
+			}
+
 			if(iou > th)
 			{
-
+				sAlreadyMatch.insert(pid);
+				assores->res = true;
 				setIns.insert(pair1.first);
 				bres = true;
 				//vecMatchPairs.push_back(std::make_pair(pid, cid));
@@ -3505,15 +3504,14 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 					pCurrIns = pCurrInstance[cid];
 				}
 				else {
-					cid = ++pCurrSeg->mnMaxId;
+					cid = pCurrSeg->mnMaxId++;
+					assores->id = cid;
 					pCurrSeg->instance.Update(cid, pSamIns);
 					pCurrSeg->mask += (sammask / 255) * cid;
 					pCurrIns = pSamIns;
 					//setNewIDs.insert(newid);
 				}
 				//glbao instance upate
-				
-				 
 
 				if (!pPrevIns->mpGlobal)
 				{
@@ -3552,11 +3550,12 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		int pid = pair.first;
 		auto res = pair.second;
 		if(res->req)
-			ObjSystem->vecObjectAssoRes.push_back(res->print(pid));
+			ObjSystem->vecObjectAssoRes.push_back(res->print(pPrevInstance[pid],pid));
 	}
 
 	 ////시각화
 	 {
+		auto pCurrInstance = pCurrSeg->instance.Get();
 		//현재 인스턴스 기본
 		for (auto pair : pCurrInstance) {
 			if (pair.first == 0)
@@ -3616,6 +3615,68 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		cv::cvtColor(prevmask, prevmask, cv::COLOR_GRAY2BGR);
 		cv::cvtColor(currmask, currmask, cv::COLOR_GRAY2BGR);
 
+		//글로벌 인스턴스 출력
+		{
+			std::set<ObjectSLAM::GlobalInstance*> setTestGlobal;
+			for (auto pair : pCurrSeg->mapResAsso) {
+
+				auto res = pair.second;
+				if (!res->res)
+					continue;
+
+				int id1 = pair.first;
+				int id2 = res->id;
+
+				auto pt1 = pPrevInstance[id1]->pt;
+				auto pt2 = pCurrInstance[id2]->pt;
+
+				if (pPrevInstance[id1]->mpGlobal) {
+					setTestGlobal.insert(pPrevInstance[id1]->mpGlobal);
+				}
+			}
+
+			std::set<ObjectSLAM::GlobalInstance*> setGlobalInstances;
+			pPrevBF->GetNeighGlobalInstnace(setGlobalInstances);
+
+			const cv::Mat T = pKF->GetPose();
+			const cv::Mat K = pKF->K.clone();
+			const cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
+			const cv::Mat t = T.rowRange(0, 3).col(3);
+
+			//std::cout << "number of bounding box " << setGlobalInstances.size() << std::endl;
+			for (auto pG : setGlobalInstances) {
+
+				if (setTestGlobal.count(pG))
+					continue;
+				if (pG->mapConnected.Size() <= 2)
+					continue;
+
+				pG->UpdatePosition();
+				auto pt = pG->ProjectPoint(T, K);
+
+				cv::circle(currmask, pt, 5, cv::Scalar(0, 255, 255), 2);
+				cv::putText(currmask, std::to_string(pG->mnId), pt, 2, 1.3, cv::Scalar(255, 255, 0), 2);
+
+				//draw map points
+				auto vecMPs = pG->AllMapPoints.ConvertVector();
+				for (auto pMPi : vecMPs) {
+					if (!pMPi || pMPi->isBad())
+						continue;
+					/*auto idx = pMPi->GetIndexInKeyFrame(pKF);
+					if (idx < 0)
+						continue;*/
+					auto pt = CommonUtils::Geometry::ProjectPoint(pMPi->GetWorldPos(), K, R, t);
+					cv::circle(currmask, pt, 5, SemanticSLAM::SemanticProcessor::SemanticColors[pG->mnId + 1], -1);
+				}
+
+				////bounding box
+				//std::vector<cv::Point2f> vecPoints;
+				//pG->CalculateBoundingBox();
+				//pG->ProjectBB(vecPoints, K, T);
+				//pG->DrawBB(currmask, vecPoints);
+			}
+		}
+
 		////id 출력
 		for (auto pair : pCurrSeg->mapResAsso) {
 			auto pid = pair.first;
@@ -3639,129 +3700,18 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 			cv::imwrite(ss.str(), resImage);
 		}
 	 }
-	
-
-
-	if(false)
-	for (auto pair1 : pMissingIns) {
-		int tid = pair1.first;
-		auto pIns = pair1.second;
-		auto pPrevIns = pPrevInstance[tid];
-		//cv::rectangle(aa, pIns->rect, cv::Scalar(255), 2);
-
-		bool bMissing = true; 
-		cv::Mat mask1 = pair1.second->mask;
-
-		for (auto pair2 : mapSamInstances) {
-			
-			cv::Mat mask2 = pair2.second->mask;
-
-			cv::Mat overlap = mask2 & mask1;
-			cv::Mat total = mask2 | mask1;
-
-			float nOverlap = (float)cv::countNonZero(overlap);
-			float nUnion = (float)cv::countNonZero(total);
-
-			float iou = nOverlap / nUnion;
-						
-			if (nOverlap > 0 && iou > 0.5) {
-				
-				//마스크 추가
-				setIns.insert(pair2.first);
-				vres += mask2;
-				bMissing = false;
-
-				int newid = ++pCurrSeg->mnMaxId;
-				setNewIDs.insert(newid);
-				pIns->mask = mask2;
-				pCurrSeg->instance.Update(newid, pIns);
-				pCurrSeg->mask += (mask2 / 255) * newid;
-
-			   	//global instance 연결
-				if (!pPrevIns->mpGlobal)
-				{
-					//생성
-					pPrevIns->mpGlobal = new ObjectSLAM::GlobalInstance();
-					pPrevIns->mpGlobal->Connect(pPrevBF, tid);
-				}
-				pIns->mpGlobal = pPrevIns->mpGlobal;
-				pIns->mpGlobal->Connect(pNewBF, newid);
-				break;
-			} 
-		}
-	}
 
 	pNewBF->mapMasks.Update("sam2", pNewMask);
 
 	//mapPoint association
 	auto pCurrIns = pCurrSeg->instance.Get();
 	
-
-	//missing instance visualization
-	/*for (auto pair2 : mapSamInstances) {
-		int id = pair2.first;
-		cv::Mat mask2 = pair2.second->mask;
-
-		int val = 0.5;
-		if (setIns.count(id))
-		{
-			val = 1.0;
-		}
-		vres += mask2 * val;
-	}*/
 	
 	std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
 	auto du_seg = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 	
 	if(bShow)
 		std::cout << "SAM2" << "== " << id << " == " << du_seg <<" == "<< pMask->id2 << " " << pMask->id1 << std::endl;
-
-	//curr instance에 추가하기.
-	//matching
-	//std::cout << "sam2 test = " << maxVal << " " << pMask->instance.size() << std::endl;
-
-	//시각화
-	//mask
-	/*int h = pNewMask->mask.rows;
-	int w = pNewMask->mask.cols;*/
-	cv::Mat segcolor = cv::Mat::zeros(h, w, CV_8UC3);
-	//인스턴스 종류와 중점 계산.
-	//sam2에서 데스크와 바닥 이런거 거르기.
-	
-	////시각화 테스트
-	//for (int y = 0; y < h; y++) {
-	//	for (int x = 0; x < w; x++) {
-	//		//바닥, 테이블, 벽 등은 스태틱으로 취급 맵포인트만 해도 됨.
-	//		int sid = pCurrSeg->mask.at<uchar>(y, x);
-	//		if (sid < 1)
-	//			continue;
-	//		
-	//		//mapMask[sid].at<uchar>(y, x) = 255;
-	//		segcolor.at<cv::Vec3b>(y, x) = SemanticSLAM::SemanticProcessor::SemanticColors[sid];
-	//	}
-	//}
-	//
-	//cv::Mat img = pNewBF->img.clone();
-	//cv::addWeighted(img, 0.5, segcolor, 0.5, 0.0, img);
-
-	//if (bVis) {
-	//	SLAM->VisualizeImage(mapName, vres, 1);
-	//	//SLAM->VisualizeImage(mapName, img, 0);
-	//	//SLAM->VisualizeImage(mapName, img, 1);
-
-	//	/*std::stringstream ss;
-	//	ss.str("");
-	//	ss << "../res/asso/" << id << "_2sam2.png";
-	//	cv::imwrite(ss.str(), vres);
-
-	//	ss.str("");
-	//	ss << "../res/asso/" << id << "_4res2.png";
-	//	cv::imwrite(ss.str(), img);
-
-	//	ss.str("");
-	//	ss << "../res/asso/" << id << "_5.png";
-	//	cv::imwrite(ss.str(), newmask2);*/
-	//}
 
 	User->mnUsed--;
 }
@@ -7071,6 +7021,7 @@ int main(int argc, char* argv[])
 				//cv::circle(cv::Mat(), cv::Point(), 5, cv::Vec2i());
 			}
 			else if (keyword == "DeviceConnect" || keyword == "SimDeviceConnect") {
+
 				WebAPI API(ip,port);
 				auto res = API.Send(ss.str(), "");
 				int nInt = 20;
