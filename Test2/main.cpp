@@ -261,6 +261,10 @@ int main(int argc, char* argv[]) {
 		itype2 = "RImage";
 		//dCamDelay = 1e6;
 	}
+	if (keydataset == "S20") {
+		srcc = ssdata.str() + "color";
+		itype1 = "Image";
+	}
 	if (nCamType == 0)
 	{
 		itype1 = "Image";
@@ -310,7 +314,6 @@ int main(int argc, char* argv[]) {
 	std::string scene_id = "office_1";*/
 	//src_cam = keydataset + ".intrinsic";
 
-	
 	std::string srct = keydataset + (scene_id)+".ts";
 	{
 		std::stringstream ss;
@@ -323,6 +326,7 @@ int main(int argc, char* argv[]) {
 		ss << "/Load?keyword=" << keydataset << "&src=" << srcc;
 		auto res = API.Send(ss.str(), "");
 	}
+	if(nCamType > 0)
 	{
 		std::stringstream ss;
 		ss << "/Load?keyword=" << keydataset << "&src=" << srcd;
@@ -333,7 +337,7 @@ int main(int argc, char* argv[]) {
 		ss << "/Load?keyword=" << keydataset << "&src=" << srct;
 		auto res = API.Send(ss.str(), "");
 	}
-	
+	std::cout <<"a == " << keydataset << " " << srcc << " " << srct << " " << src_cam << std::endl;
 
 	double tframe = 20.0;
 	cv::Mat cam_data;
@@ -369,8 +373,7 @@ int main(int argc, char* argv[]) {
 		int fid = 0;
 		int nInt = 20;
 		int nByte = 10;
-
-		
+				
 		//11,12,13 : Ä÷¸®Æ¼, ½ºÅµ, ?
 		//14,15,16 µª½º °ü·Ã. mbf, mthdepth, mdepthmapfactor
 		//17, 18 : Ä«¸Þ¶ó : 0 ¸ð³ë, 1 : ½ºÅ×·¹¿À 2: µª½º
