@@ -173,6 +173,12 @@ cv::Mat Kinv;
 cv::Mat plane = cv::Mat::zeros(4, 1, CV_32FC1);
 //평면 정보
 
+//테스트용 파라메터
+bool bWiseUITest = false;
+std::string respath1, respath2;
+std::string strStartTime, strEndTime;
+std::vector<std::string> vecStrTrackingTime;
+
 void CallBackFunc(int event, int x, int y, int flags, void* userdata)
 {
 	//float* tempData = (float*)userdata;
@@ -385,130 +391,6 @@ void UpdateReferenceFrameFromEdgeServer(int fid, float* data) {
 	}
 	//std::cout << "Received MPs = " << N <<", "<< nRefMatches << std::endl;
 }
-void UpdateLocalMapFromEdgeServer(float* data) {
-	int nSize = (int)data[0];
-	if (nSize == 2) {
-		return;
-	}
-
-	int nLocalMap = (int)data[2];
-	int nObsIdx = 3;
-	int nUpdatedMPs = (int)data[nObsIdx + nLocalMap];
-	int nUpdatedIdx = nObsIdx + nLocalMap + 1;
-
-	std::vector<EdgeDeviceSLAM::MapPoint*> vpMPs;// = std::vector<EdgeSLAM::MapPoint*>(n, static_cast<EdgeSLAM::MapPoint*>(nullptr));
-
-	for (int i = 0; i < nUpdatedMPs; i++) {
-
-		int id = (int)data[nUpdatedIdx++];
-		float minDist = data[nUpdatedIdx++];
-		float maxDist = data[nUpdatedIdx++];
-
-		//Xw
-		float x = data[nUpdatedIdx++];
-		float y = data[nUpdatedIdx++];
-		float z = data[nUpdatedIdx++];
-		cv::Mat X = (cv::Mat_<float>(3, 1) << x, y, z);
-
-		//normal
-		float nx = data[nUpdatedIdx++];
-		float ny = data[nUpdatedIdx++];
-		float nz = data[nUpdatedIdx++];
-		cv::Mat norm = (cv::Mat_<float>(3, 1) << nx, ny, nz);
-
-		//desc
-		void* ptrdesc = data + nUpdatedIdx;
-		nUpdatedIdx += 8;
-		cv::Mat desc(1, 32, CV_8UC1, ptrdesc);
-
-		EdgeDeviceSLAM::MapPoint* pMP = nullptr;
-		if (pMap->MapPoints.Count(id)) {
-			pMP = pMap->MapPoints.Get(id);
-			pMP->SetWorldPos(X.at<float>(0), X.at<float>(1), X.at<float>(2));
-		}
-		else {
-			pMP = new EdgeDeviceSLAM::MapPoint(id, X.at<float>(0), X.at<float>(1), X.at<float>(2),pMap);
-			pMap->MapPoints.Update(id, pMP);
-		}
-		pMP->SetMapPointInfo(minDist, maxDist, norm);
-		pMP->SetDescriptor(desc);
-
-	}
-
-	int nError = 0;
-	//add not updated mps
-	for (int i = 0; i < nLocalMap; i++) {
-		int id = (int)data[nObsIdx++];
-
-		EdgeDeviceSLAM::MapPoint* pMP = nullptr;
-		if (pMap->MapPoints.Count(id)) {
-			pMP = pMap->MapPoints.Get(id);
-			vpMPs.push_back(pMP);
-		}
-		else
-			nError++;
-	}
-	pMap->LocalMapPoints.Copy(vpMPs);
-	if (!bSetLocalMap) {
-		bSetLocalMap = true;
-	}
-
-	//bReqLocalMap = false;
-	//nLastKeyFrameId = id;
-}
-
-void UpdateLocalPlane(float* data) {
-	int nSize = (int)data[0];
-	if (nSize == 2) {
-		return;
-	}
-	int N = (int)data[2];
-	int idx = 3;
-	for (int i = 0; i < N; i++) {
-		int id = (int)data[idx];
-		float nx = data[idx + 1];
-		float ny = data[idx + 2];
-		float nz = data[idx + 3];
-		float d  = data[idx + 4];
-		idx += 5;
-		plane.at<float>(0) = nx;
-		plane.at<float>(1) = ny;
-		plane.at<float>(2) = nz;
-		plane.at<float>(3) = d;
-		break;
-	}
-}
-
-void UpdateLocalContent(float* data) {
-	int Nconnect = (int)data[2];
-	int Ncontent = (int)data[3 + Nconnect];
-	int cidx = 4 + Nconnect; //vo idx
-
-	/*{
-		std::unique_lock<std::mutex> lock(MutexVO);
-		MatVO.at<float>(0) = -10000;
-		MatVO.at<float>(1) = -10000;
-		MatVO.at<float>(2) = -10000;
-	}*/
-
-
-
-	for (int j = 0; j < Ncontent; j++)
-	{
-		int len = (int)data[cidx];
-		cv::Mat X = cv::Mat::ones(4, 1, CV_32FC1);
-		X.at<float>(0) = data[cidx + 3];
-		X.at<float>(1) = -data[cidx + 4];
-		X.at<float>(2) = data[cidx + 5];
-		cidx += len;
-		
-		{
-			std::unique_lock<std::mutex> lock(MutexVO);
-			MatVO = X.clone();
-		}
-	}
-	
-}
 
 void ParsingData(int fid, float* totalData, int totalLength) {
 	int nextid = 0;  
@@ -519,35 +401,20 @@ void ParsingData(int fid, float* totalData, int totalLength) {
 	{
 		if (pid == 1)
 		{
-			//맵포인트 생성
-			//int Nmp = (int)totalData[nextid + 2];
-			//visualization
-			//float[] points = new float[Nmp * 3];
-			//GCHandle handle2 = GCHandle.Alloc(points, GCHandleType.Pinned);
-			//IntPtr ptr2 = handle2.AddrOfPinnedObject();
-			//mTracker.CreateKeyFrame(id, ptr, nextid, ptr2);
-			//mPointCloudManager.UpdateMPs(ref totalData, ref points, Nmp, nextid);
-			//handle2.Free();
-			//EraseImage(id);
-			//update keyframe
 			UpdateReferenceFrameFromEdgeServer(fid, totalData + nextid);
 			EraseImage(fid);
 		}
 		else if (pid == 2)
 		{
-			//update local map
-			//mTracker.UpdateData(id, ptr + nextid);
-			UpdateLocalMapFromEdgeServer(totalData + nextid);
+			//UpdateLocalMapFromEdgeServer(totalData + nextid);
 		}
 		else if (pid == 3)
 		{
-			UpdateLocalContent(totalData + nextid);
-			//mContentManager.UpdateVirtualFrame(id, ref totalData, nextid, receivedTime, mExParam.bEdgeBase);
+			//UpdateLocalContent(totalData + nextid);
 		}
 		else if (pid == 4)
 		{
-			UpdateLocalPlane(totalData + nextid);
-			//mPlaneManager.UpdateLocalPlane(id, ref totalData, nextid);
+			//UpdateLocalPlane(totalData + nextid);
 		}
 		//std::cout << size << " " << nextid << " " << totalLength << std::endl;
 		//갱신
@@ -640,7 +507,6 @@ int Tracking(const cv::Mat& img, int id, double ts) {
 		pCameraPose->Init();
 		pMotionModel->reset();
 	}
-
 	bool bres = bTrack;
 	//std::cout << "tracking test = " << nMatch << std::endl;
 	return -1;
@@ -810,6 +676,36 @@ void SaveTrajectory() {
 	std::cout << "save trajectory = " << trajectoryPath << std::endl;
 }
 
+void SaveProcessingTime() {
+	if (!bWiseUITest)
+		return;
+	{
+		std::ofstream file;
+		file.open(respath1, std::ios::trunc);
+		std::stringstream ss;
+		
+		std::string strHeader = "Module,Start time,End time,Latency(sec)";
+		//file.write(strHeader.c_str(),strHeader.size());
+		ss << strHeader << std::endl;
+		for (int i = 0, N = vecStrTrackingTime.size(); i < N; i++) {
+			ss << vecStrTrackingTime[i]<<std::endl;
+		}
+		file.write(ss.str().c_str(), ss.str().size());
+		file.close();
+	}
+	{
+		std::ofstream file;
+		file.open(respath2, std::ios::trunc);
+		std::stringstream ss;
+
+		std::string strHeader = "Total start time(hh:mm:ss:fff),Total end time(hh:mm:ss:fff)";
+		ss << strHeader << std::endl;
+		ss << strStartTime << "," << strEndTime << std::endl;
+		file.write(ss.str().c_str(), ss.str().size());
+		file.close();
+	}
+}
+
 void SaveLatency() {
 	if (!bSaveLatency)
 		return;
@@ -910,6 +806,20 @@ void parsing(char* argv[], int& index) {
 	else if (keyword == "--SAVE") {
 		bSave = true;
 	}
+	else if (keyword == "--WISETEST")
+	{
+		bWiseUITest = true;
+		bSaveTrajectory = true;
+		//trajectory
+		
+		//latency
+
+		//total time
+		trajectoryPath = argv[index++];
+		respath1 = argv[index++];
+		respath2 = argv[index++];
+
+	}
 }
 
 void parser(int argc, char* argv[], int index) {
@@ -921,145 +831,7 @@ void parser(int argc, char* argv[], int index) {
 
 int main(int argc, char* argv[]) {
 	
-	//평면 테스트
-	if(false)
-	{
-		long long total1 = 0.0;
-		long long total2 = 0.0;
-		long long total3 = 0.0;
-		for (int aa = 0; aa < 100; aa++) {
-			cv::Mat R = cv::Mat::eye(3, 3, CV_32FC1);
-			cv::Mat t = cv::Mat::ones(3, 1, CV_32FC1);
-			cv::Mat K = cv::Mat::eye(3, 3, CV_32FC1);
-			K.at<float>(0, 0) = 480;
-			K.at<float>(1, 1) = 480;
-			K.at<float>(0, 2) = 320;
-			K.at<float>(1, 2) = 240;
-			cv::Mat Kinv = K.inv();
-			cv::Mat P = cv::Mat::eye(3, 4, CV_32FC1);
-			P.at<float>(0, 3) = 2;
-			P.at<float>(1, 3) = 3;
-			P.at<float>(2, 3) = 4;
-
-			cv::Mat O = cv::Mat::ones(3, 1, CV_32FC1);
-
-			cv::Mat n = cv::Mat::zeros(3, 1, CV_32FC1);
-			n.at<float>(1) = -1;
-			float p = 3.0;
-
-			int inc = 1;
-
-			cv::Mat A = R * Kinv;
-			cv::Mat T = cv::Mat::eye(4, 4, CV_32FC1);
-			cv::Mat Kinv2 = cv::Mat::eye(4, 4, CV_32FC1);
-			Kinv2.at<float>(3, 3) = 0.0;
-			A = T * Kinv2;
-
-			int idx = 0;
-			cv::Mat Temp = cv::Mat::ones(4, 640 * 480, CV_32FC1);
-			std::chrono::high_resolution_clock::time_point t5 = std::chrono::high_resolution_clock::now();
-			for (int x = 0; x < 640; x += inc) {
-				for (int y = 0; y < 480; y += inc) {
-					cv::Mat X = (cv::Mat_<float>(4, 1) << x, y, 1, 1);
-					X.copyTo(Temp.col(idx));
-					idx++;
-				}
-			}
-			cv::Mat B = A * Temp;
-			std::chrono::high_resolution_clock::time_point t6 = std::chrono::high_resolution_clock::now();
-
-
-			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-			idx = 0;
-			for (int x = 0; x < 640; x += inc) {
-				for (int y = 0; y < 480; y += inc) {
-					//cv::Mat X = (cv::Mat_<float>(4, 1) << x, y, 1, 1);
-					//cv::Mat dir =  (A * X);
-					//dir = dir.rowRange(0, 3);
-					cv::Mat dir = B.col(idx++).rowRange(0, 3);
-					for (int i = 0; i < 3; i++) {
-						float a1 = n.dot(dir) + p;
-						float a2 = n.dot(O);
-						float depth = a1 / a2;
-					}
-
-					//std::cout <<"ㅁ=" << n.dot(dir) + p << std::endl;
-					//std::cout <<"ㅠ=" << n.dot(O) << std::endl;
-					//float depth = (n.dot(dir) + p) / (n.dot(0));
-				}
-			}
-
-			std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-
-			std::chrono::high_resolution_clock::time_point t3 = std::chrono::high_resolution_clock::now();
-			idx = 0;
-			for (int x = 0; x < 640; x += inc) {
-				for (int y = 0; y < 480; y += inc) {
-					/*cv::Mat X = (cv::Mat_<float>(4, 1) << x, y,1, 1);
-					cv::Mat dir = (A * X);
-					dir = dir.rowRange(0, 3);*/
-					cv::Mat dir = B.col(idx++).rowRange(0, 3);
-					for (int i = 0; i < 3; i++) {
-						float depth = (O.at<float>(1) + p) / dir.at<float>(1);
-					}
-				}
-			}
-			std::chrono::high_resolution_clock::time_point t4 = std::chrono::high_resolution_clock::now();
-
-			auto d1 = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-			auto d2 = std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count();
-			auto d3 = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5).count();
-			std::cout <<aa<< " = test = " << d1 << " " << d2 << " " << d3 << std::endl;
-			total1 += d1;
-			total2 += d2;
-			total3 += d3;
-		}
-		std::cout << " test = " << ((double)total1) / 100 << " " << ((double)total2) / 100 << " " << ((double)total3) / 100 << std::endl;
-	}
-	
-	
-	if(false)
-	{
-		cv::VideoCapture cap2("./aaa.mp4"); 
-		cv::VideoCapture cap("./aaa.mp4");
-		
-		// 동영상의 오디오는 출력하지 않음
-		
-		if (!cap.isOpened()) {
-			//cerr << "Camera open failed!" << endl;
-			return -1;
-		}
-
-		std::cout << "Frame width: " << cvRound(cap.get(cv::CAP_PROP_FRAME_WIDTH)) << std::endl;
-		std::cout << "Frame height: " << cvRound(cap.get(cv::CAP_PROP_FRAME_HEIGHT)) << std::endl;
-		std::cout << "Frame count: " << cvRound(cap.get(cv::CAP_PROP_FRAME_COUNT)) << std::endl;	// 동영상파일 전체 프레임 수
-		
-		double fps2 = cap.get(cv::CAP_PROP_FPS);
-		std::cout << "FPS: " << fps2 << std::endl;
-		int delay = cvRound(1000 / fps2);
-		// 동영상 파일의 FPS값을 이용하여 매 프레임 사이의 시간간격을 ms 단위로 구함
-		// 초당 30프레임을 재생하는 동영상의 경우 딜레이는 33ms 가 됨
-
-		cv::Mat frame, inversed;
-		cv::Mat frame2;
-		while (true) {
-			cap >> frame;
-			
-			if (frame.empty())
-				continue;
-			inversed = ~frame;	// 반전
-
-			imshow("frame", frame);
-			imshow("inversed", inversed);
-			std::cout << frame.size() << " " << frame.channels() << std::endl;
-			if (cv::waitKey(delay) == 27)	// ESC key delay 값을 10ms으로 줄이면 영상이 빨라짐
-				break;
-		}
-		cv::destroyAllWindows();
-
-		return 0;
-	}
-	
+	strStartTime = Utils::GetTimeStamp(":").str();
 	std::cout << Utils::GetTimeStamp("_").str() << std::endl;
 	WSAData wsaData;
 	int code = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -1215,8 +987,11 @@ int main(int argc, char* argv[]) {
 		//처음 시작 시간 설정
 		//time_initialization = std::chrono::high_resolution_clock::now();
 
+		std::string separator = ":";
 		while (true) {
-			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+			//std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+			auto t1 = std::chrono::system_clock::now();
+
 			double ts_image,ts_depth;
 			cv::Mat img;
 			cv::Mat depth;
@@ -1238,10 +1013,39 @@ int main(int argc, char* argv[]) {
 
 				//tracking
 				if(bTracking){
+					auto t1 = std::chrono::system_clock::now();
 					Tracking(img,fid, ts_image);
+					auto t2 = std::chrono::system_clock::now();
+
+					std::string str1, str2;
+					{
+						std::time_t timer = std::chrono::system_clock::to_time_t(t1);
+						struct tm t;
+						auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1.time_since_epoch()).count();
+						localtime_s(&t, &timer);
+						std::stringstream ss;
+						ss << t.tm_hour << separator << t.tm_min << separator << t.tm_sec << separator << std::setfill('0') << std::setw(3) << ms % 1000;
+						str1 = ss.str();
+					}
+					{
+						std::time_t timer = std::chrono::system_clock::to_time_t(t2);
+						struct tm t;
+						auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2.time_since_epoch()).count();
+						localtime_s(&t, &timer);
+						std::stringstream ss;
+						ss << t.tm_hour << separator << t.tm_min << separator << t.tm_sec << separator << std::setfill('0') << std::setw(3) << ms % 1000;
+						str2 = ss.str();
+					}
+					double ttrack = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count();
+
+					{
+						std::stringstream ss;
+						ss << "Test 2, " << str1 << "," << str2 << "," << ttrack;
+						vecStrTrackingTime.push_back(ss.str());
+					}
 				}
-				if(bGenVO && nVoID <= 300)
-					POOL->EnqueueJob(SendVirtualObject, &API, src);
+				/*if(bGenVO && nVoID <= 300)
+					POOL->EnqueueJob(SendVirtualObject, &API, src);*/
 				if (fid % nskip == 0) {
 					StoreImage(fid, img);
 					POOL->EnqueueJob(SendImageData, &API, img, src, datakeyword, fid, ".jpg", tempParam, ts_image);
@@ -1256,25 +1060,30 @@ int main(int argc, char* argv[]) {
 				std::cout<< std::fixed << std::cout.precision(9) << " track = " << ts_image << std::endl;
 			}
 
-			if (bCaptureDepth) {
-				//capture depth
-				bool bdepth = dataset->GrabDepth(depth, ts_depth);
-				if (bdepth && fid % nskip == 0) {
-					//std::cout << "depth type = " << depth.type() << " " << CV_16SC1 << " " << CV_16UC1 <<" "<<CV_16SC2 <<" "<<CV_16UC2 << std::endl;
-					//send
-					POOL->EnqueueJob(SendImageData, &API, depth, src, "Depth", fid, ".png", depthParam, ts_depth);
-					//cv::imshow("depth", depth);
-				}
-				
-			}
+			//if (bCaptureDepth) {
+			//	//capture depth
+			//	bool bdepth = dataset->GrabDepth(depth, ts_depth);
+			//	if (bdepth && fid % nskip == 0) {
+			//		//std::cout << "depth type = " << depth.type() << " " << CV_16SC1 << " " << CV_16UC1 <<" "<<CV_16SC2 <<" "<<CV_16UC2 << std::endl;
+			//		//send
+			//		POOL->EnqueueJob(SendImageData, &API, depth, src, "Depth", fid, ".png", depthParam, ts_depth);
+			//		//cv::imshow("depth", depth);
+			//	}
+			//}
 
 			if (!bimg) {
 				nLastID = nSendID;
 				break;
 			}
 
-			std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+			//std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+			auto t2 = std::chrono::system_clock::now();
+			//tracking time
+			//t2-t1
+			
+
 			double ttrack = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count();
+			
 			if (ttrack < tframe) {
 				auto diff = (tframe - ttrack) * 1e3;
 				long long delay = (long long)diff;
@@ -1284,6 +1093,8 @@ int main(int argc, char* argv[]) {
 			//cv::waitKey(1);
 		}
 
+		strEndTime = Utils::GetTimeStamp(":").str();
+
 		std::cout << "done " << std::endl;
 		//device disconnect
 		{
@@ -1292,9 +1103,11 @@ int main(int argc, char* argv[]) {
 			ss << "/Upload?keyword=SimDeviceDisconnect&id=" << fid << "&src=" << src;// << "&type2=" << user->userName;
 			auto res = API.Send(ss.str(), temp.data, temp.rows);
 
+			std::cout << "save start" << std::endl;
 			SaveLatency();
+			SaveProcessingTime();
 			SaveTrajectory();
-			
+			std::cout << "save end" << std::endl;
 		}
 	}
 	return 0;
