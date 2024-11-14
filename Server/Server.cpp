@@ -4672,7 +4672,7 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 	cv::Mat nimg = cv::Mat::zeros(h, w, CV_8UC1);;
 	{
 		std::stringstream ss;
-		ss << "/Download?keyword=sam2c" << "&id=" << id << "&src=" << user;
+		ss << "/Download?keyword=yolosegc" << "&id=" << id << "&src=" << user;
 		WebAPI API("143.248.6.143", 35005);
 		auto res = API.Send(ss.str(), "");
 
@@ -4684,7 +4684,7 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 			int iid = temp.at<ushort>(idx++);
 			int ni = temp.at<ushort>(idx++);
 
-			//std::cout << iid << " " << ni << " " << idx << std::endl;
+			//std::cout << iid << " " << ni << " " << idx <<" "<<temp.rows << std::endl;
 
 			std::vector<cv::Point> contour;
 			for (int ti = 0; ti < ni; ti++)
