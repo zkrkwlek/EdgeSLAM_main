@@ -2102,9 +2102,19 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	}
 	pNewBF->mapMasks.Update("gmissing", pGlobalMissMask);
 
-	//ObjSystem->vecObjectAssoRes.push_back("asso::test2");
-
-	//ObjSystem->vecObjectAssoRes.push_back("associaet::map&frame::end");
+	{
+		//처리 시간 기록
+		if (ObjSystem->MapTimeStampForKF.Count(pKF->mnId)) {
+			std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
+			auto s = ObjSystem->MapTimeStampForKF.Get(pKF->mnId);
+			auto e = t_end.time_since_epoch().count();
+			auto du_latency = (e - s) / 1000000.0;
+			std::string keylat = "assoseg";
+			auto vec = ObjSystem->MapLatency.Get(keylat);
+			vec.push_back(du_latency);
+			ObjSystem->MapLatency.Update(keylat, vec);
+		}
+	}
 
 	std::chrono::high_resolution_clock::time_point t_global_test = std::chrono::high_resolution_clock::now();
 	if (false)
@@ -3318,6 +3328,18 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		ObjSystem->vecObjectAssoRes.push_back(ss.str());
 	} 
 
+	//처리 시간 기록
+	if (ObjSystem->MapTimeStampForKF.Count(pKF->mnId)) {
+		std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
+		auto s = ObjSystem->MapTimeStampForKF.Get(pKF->mnId);
+		auto e = t_end.time_since_epoch().count();
+		auto du_latency = (e - s) / 1000000.0;
+		std::string keylat = "assosam";
+		auto vec = ObjSystem->MapLatency.Get(keylat);
+		vec.push_back(du_latency);
+		ObjSystem->MapLatency.Update(keylat, vec);
+	}
+
 	//std::cout << "sam::6" << std::endl;
 
 	 ////시각화
@@ -3480,18 +3502,6 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	 }
 
 	pNewBF->mapMasks.Update("sam2", pNewMask);
-
-	//처리 시간 기록
-	if (ObjSystem->MapTimeStampForKF.Count(pKF->mnId)) {
-		std::chrono::high_resolution_clock::time_point t_end = std::chrono::high_resolution_clock::now();
-		auto s = ObjSystem->MapTimeStampForKF.Get(pKF->mnId);
-		auto e = t_end.time_since_epoch().count();
-		auto du_latency = (e - s) / 1000000.0;
-		std::string keylat = "assosam";
-		auto vec = ObjSystem->MapLatency.Get(keylat);
-		vec.push_back(du_latency);
-		ObjSystem->MapLatency.Update(keylat, vec);
-	}
 
 	//mapPoint association
 	auto pCurrIns = pCurrSeg->FrameInstances.Get();
