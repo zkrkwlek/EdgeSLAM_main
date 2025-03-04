@@ -177,6 +177,8 @@ void parser(int argc, char* argv[], int index) {
 
 int main(int argc, char* argv[]) {
 
+	
+
 	std::string ip;
 	int port;
 	ip = argv[1];

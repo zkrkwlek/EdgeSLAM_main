@@ -15,6 +15,20 @@
 #include <ConcurrentVector.h>
 #include <ConcurrentDeque.h>
 
+//tracker
+#include <./EdgeDeviceSLAM/include/Tracker.h>
+#include <./EdgeDeviceSLAM/include/SearchPoints.h>
+#include <./EdgeDeviceSLAM/include/RefFrame.h>
+#include <./EdgeDeviceSLAM/include/Frame.h>
+#include <./EdgeDeviceSLAM/include/Map.h>
+#include <./EdgeDeviceSLAM/include/MapPoint.h>
+#include <./EdgeDeviceSLAM/include/ORBDetector.h>
+#include <./EdgeDeviceSLAM/include/Camera.h>
+#include <./EdgeDeviceSLAM/include/CameraPose.h>
+#include <./EdgeDeviceSLAM/include/MotionModel.h>
+#include <./EdgeDeviceSLAM/include/Converter.h>
+//tracker
+
 #pragma comment(lib, "ws2_32")
 #include <WS2tcpip.h>
 
@@ -42,6 +56,8 @@ int nCamType = 0;// 0 : mono, 1 : stereo, 2 : rgbd
 int nIMUType = 0;// 0 : NONE, 1 : gyro, 2 : gyro + acc
 int nFeature = 1000;
 bool bSave = false;
+bool bEXIT = true;
+
 std::string keydataset = "";
 std::string scene_id = "";
 std::string src_cam = "";
@@ -130,6 +146,9 @@ void parsing(char* argv[], int& index) {
 	else if (keyword == "--SAVE") {
 		bSave = true;
 	}
+	else if (keyword == "--STOP") {
+		bEXIT = false;
+	}
 }
 
 void parser(int argc, char* argv[], int index) {
@@ -186,6 +205,115 @@ void ReceiveData(SOCKET sock) {
 			std::cout << "device = " << keyword << " " << du_down << " " << du_latency << std::endl;
 		}
 	}
+}
+
+//tracker
+EdgeDeviceSLAM::Frame* pCurrFrame = nullptr;
+EdgeDeviceSLAM::Frame* pPrevFrame = nullptr;
+EdgeDeviceSLAM::Camera* pCamera;
+EdgeDeviceSLAM::ORBDetector* pDetector;
+EdgeDeviceSLAM::MotionModel* pMotionModel;
+EdgeDeviceSLAM::CameraPose* pCameraPose;
+EdgeDeviceSLAM::Tracker* pTracker;
+EdgeDeviceSLAM::Map* pMap;
+
+EdgeDeviceSLAM::ORBDetector* EdgeDeviceSLAM::Tracker::Detector;
+EdgeDeviceSLAM::ORBDetector* EdgeDeviceSLAM::SearchPoints::Detector;
+EdgeDeviceSLAM::ORBDetector* EdgeDeviceSLAM::MapPoint::Detector;
+EdgeDeviceSLAM::ORBDetector* EdgeDeviceSLAM::RefFrame::Detector;
+EdgeDeviceSLAM::ORBDetector* EdgeDeviceSLAM::Frame::detector;
+
+std::atomic<int> nMatch = -1;
+bool bSetReferenceFrame = false;
+bool bSetLocalMap = false;
+std::vector<cv::Mat> vecTrajectories;
+std::vector<double> vecTimestamps;
+//tracker
+
+int Tracking(const cv::Mat& img, int id, double ts) {
+
+	cv::Mat gray;
+	cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+
+	if (pPrevFrame)
+		delete pPrevFrame;
+	pPrevFrame = pCurrFrame;
+	pCurrFrame = new EdgeDeviceSLAM::Frame(gray, pCamera, id);
+
+	bool bTrack = false;
+
+	if (!bSetReferenceFrame || !bSetLocalMap)
+		return -1;
+	if (pTracker->mTrackState == EdgeDeviceSLAM::TrackingState::NotEstimated || pTracker->mTrackState == EdgeDeviceSLAM::TrackingState::Failed) {
+
+		EdgeDeviceSLAM::RefFrame* rf = pMap->ReferenceFrame.Get();
+		if (rf) {
+			nMatch = pTracker->TrackWithReferenceFrame(rf, pCurrFrame, 100.0, 50.0);
+			bTrack = nMatch >= 10;
+			if (bTrack) {
+				pTracker->mnLastRelocFrameId = pCurrFrame->mnFrameID;
+			}
+		}
+	}
+
+	if (pTracker->mTrackState == EdgeDeviceSLAM::TrackingState::Success) {
+
+		pCurrFrame->SetPose(pMotionModel->predict());
+		nMatch = pTracker->TrackWithPrevFrame(pPrevFrame, pCurrFrame, 100.0, 50.0);
+		bTrack = nMatch >= 10;
+		if (!bTrack) {
+			EdgeDeviceSLAM::RefFrame* rf = pMap->ReferenceFrame.Get();
+			if (rf) {
+				nMatch = pTracker->TrackWithReferenceFrame(rf, pCurrFrame, 100.0, 50.0);
+				bTrack = nMatch >= 10;
+			}
+		}
+	}
+	if (bTrack) {
+		auto vecLocalMPs = pMap->LocalMapPoints.get();
+		nMatch = 4;
+		//WriteLog("Localization::TrackLocalMap::Start");
+		nMatch = pTracker->TrackWithLocalMap(pCurrFrame, vecLocalMPs, 100.0, 50.0);
+		//WriteLog("Localization::TrackLocalMap::End");
+		if (pCurrFrame->mnFrameID < pTracker->mnLastRelocFrameId + 30 && nMatch < 30) {
+			bTrack = false;
+		}
+		else if (nMatch < 30) {
+			bTrack = false;
+		}
+		else {
+			bTrack = true;
+		}
+	}
+
+	if (bTrack) {
+		pTracker->mTrackState = EdgeDeviceSLAM::TrackingState::Success;
+		cv::Mat T = pCurrFrame->GetPose();
+		pCameraPose->SetPose(T);
+		pMotionModel->update(T);
+
+		////유니티에 카메라 포즈 복사
+		////R과 카메라 센터
+		//cv::Mat t = T.col(3).rowRange(0, 3).t();
+		cv::Mat P = cv::Mat::zeros(4, 3, CV_32FC1);
+		T.rowRange(0, 3).colRange(0, 3).copyTo(P.rowRange(0, 3));
+		//센터 또는 t임.
+		cv::Mat Ow = pCameraPose->GetCenter().t();
+		//cv::Mat Ow = T.col(3).rowRange(0,3).t();
+		Ow.copyTo(P.row(3));
+		vecTrajectories.push_back(T);
+		vecTimestamps.push_back(ts);
+		//P.copyTo(Pose.rowRange(0, 4).colRange(0, 3));
+	}
+	else {
+		pTracker->mTrackState = EdgeDeviceSLAM::TrackingState::Failed;
+		pCameraPose->Init();
+		pMotionModel->reset();
+	}
+
+	bool bres = bTrack;
+	//std::cout << "tracking test = " << nMatch << std::endl;
+	return -1;
 }
 
 int main(int argc, char* argv[]) {
@@ -478,6 +606,7 @@ int main(int argc, char* argv[]) {
 
 	}
 	
+	if(bEXIT)
 	{
 		std::stringstream ss;
 		cv::Mat temp = cv::Mat::zeros(1000, 1, CV_32FC1);

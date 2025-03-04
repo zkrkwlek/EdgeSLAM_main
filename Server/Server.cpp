@@ -1321,8 +1321,9 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 			}
 		}
 		//pCurrSegMask->mapResAsso[id1] = assores;
-		assores->nDataType = 1;
-		assores->nAssotype = 1;
+		//assores->nDataType = 1;
+		//assores->nAssotype = 1;
+		assores->nType1 = ObjectSLAM::InstanceType::SEG;
 		pCurrSegMask->mvResAsso.push_back(assores);
 		if (assores->res)
 		{
@@ -1387,8 +1388,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 				pAssoRes->id1 = pid;
 				pAssoRes->id2 = cid;
 				pAssoRes->res = true;
-				pAssoRes->nAssotype = 1;
-				pAssoRes->nDataType = 1;
+				pAssoRes->nType1 = ObjectSLAM::InstanceType::SEG;
+				//pAssoRes->nDataType = 1;
 				pCurrSegMask->mvResAsso.push_back(pAssoRes);
 				mapCurrAssores[cid] = pAssoRes;
 				break;
@@ -1489,8 +1490,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 				pAssoRes->id1 = pG->mnId;
 				pAssoRes->id2 = cid;
 				pAssoRes->res = true;
-				pAssoRes->nAssotype = 1;
-				pAssoRes->nDataType = 2;
+				//pAssoRes->nAssotype = 1;
+				//pAssoRes->nDataType = 2;
 				pCurrSegMask->mvResAsso.push_back(pAssoRes);
 				mapCurrAssores[cid] = pAssoRes;
 
@@ -1507,8 +1508,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 			pAssoRes->id1 = pG->mnId;
 			pAssoRes->res = false;
 			pAssoRes->req = true;
-			pAssoRes->nAssotype = 1;
-			pAssoRes->nDataType = 2;
+			//pAssoRes->nAssotype = 1;
+			//pAssoRes->nDataType = 2;
 
 			pCurrSegMask->mvResAsso.push_back(pAssoRes);
 			//std::cout << "req asdf " <<pNewBF->mnId<<" "<<pG->mnId<<" " << max_val << std::endl;
@@ -1734,7 +1735,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	{
 		if (assores->res || !assores->req)
 			continue;
-		if (assores->nDataType != 1)
+		if (assores->nType1 != ObjectSLAM::InstanceType::SEG)
 			continue;
 		int mid = assores->id1;
 
@@ -1769,7 +1770,7 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 		auto bSuccess = res->res;
 		auto bRequest = res->req;
 
-		if (res->nDataType != 1)
+		if (res->nType1 != ObjectSLAM::InstanceType::MAP)
 			continue;
 
 		if (!bSuccess) {
@@ -1839,8 +1840,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 	////mvResAsso로 수행하기
 
 	//시각화 관련
-	if(ptdata.rows == 0)
-		ObjectSLAM::AssociationManager::VisualizeAssociation(SLAM, pNewBF, pPrevBF, pCurrSegMask, pPrevSegMask, mapName);
+	//if(ptdata.rows == 0)
+	//	ObjectSLAM::AssociationManager::VisualizeAssociation(SLAM, pNewBF, pPrevBF, pCurrSegMask, pPrevSegMask, mapName);
 	
 	if(false){
 
@@ -1860,8 +1861,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 				auto cid = assores->id2;
 				auto pIns = pPrevSegInstance[pid];
 
-				if (assores->nDataType != 1)
-					continue;
+				//if (assores->nDataType != 1)
+				//	continue;
 
 				auto bSuccess = assores->res;
 				auto bRequest = assores->req;
@@ -1909,8 +1910,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 			{
 				if (!assores->res)
 					continue;
-				if (assores->nDataType != 1)
-					continue;
+				//if (assores->nDataType != 1)
+				//	continue;
 				int id1 = assores->id1;
 				int id2 = assores->id2;
 
@@ -1990,8 +1991,8 @@ void AssociateMissingObject2(EdgeSLAM::SLAM* SLAM, ObjectSLAM::ObjectSLAM* ObjSL
 				for (auto assores : vecResAsso)
 				{
 					auto pid = assores->id1;
-					if (assores->nDataType != 1)
-						continue;
+					//if (assores->nDataType != 1)
+					//	continue;
 					auto pIns = pPrevSegInstance[pid];
 					auto textpt = pIns->pt;
 					cv::putText(prevmask, std::to_string(pid), textpt, 2, 1.3, cv::Scalar(255, 0, 0), 2);
@@ -2203,7 +2204,12 @@ void raft(EdgeSLAM::SLAM* SLAM, std::string src, int id, long long received_ts) 
 			bAsso = true;
 			//std::cout << "success asso in raft" << id << std::endl;
 			//AssociateMissingObject(SLAM, user + ".Image", id, mapName, pNewBF, pPrevSegMask, pCurrSegMask, pRaftMask);
-			AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, true);
+			//ObjectSLAM::AssociationManager::AssociationWithMAP(
+			//	SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, true);
+			
+			ObjectSLAM::AssociationManager::Association(
+				SLAM, ObjSystem, "seg", id, id2, mapName, user, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, true);
+			//AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSegMask, pCurrSegMask, pRaftMask, false);
 		}
 				
 		//if (bAsso && pNewBF->mapMasks.Count("missing")) {
@@ -2414,18 +2420,18 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	auto pNewBF = ObjSystem->MapKeyFrameNBoxFrame.Get(id);//pObjDevice->mpCurrBF;
 	ObjectSLAM::InstanceMask* pMissingMask = pNewBF->mapMasks.Get("missing");// new ObjectSLAM::InstanceMask();
 	pNewBF->mbSam2 = true;
+	
 	auto pKF = pNewBF->mpRefKF;
-	auto pPrevBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pMissingMask->id1);
-
-	auto pPrevSeg = pPrevBF->mapMasks.Get("yoloseg");
 	auto pCurrSeg = pNewBF->mapMasks.Get("yoloseg");
-
-	auto pPrevInstance = pPrevSeg->FrameInstances.Get();
 	auto pCurrInstance = pCurrSeg->FrameInstances.Get();
 
+	//auto pPrevBF = pNewBF->mpPrevBF; //ObjSystem->MapKeyFrameNBoxFrame.Get(pMissingMask->id1);
+	//auto pPrevSeg = pPrevBF->mapMasks.Get("yoloseg");
+	//auto pPrevInstance = pPrevSeg->FrameInstances.Get();
+	
 	{
 		std::stringstream ss;
-		ss << "sam::start," << id<<","<< pCurrInstance.size()<<","<<pPrevInstance.size();
+		ss << "sam::start," << id << "," << pCurrInstance.size();// << "," << pPrevInstance.size();
 		ObjSystem->vecObjectAssoRes.push_back(ss.str());
 	}
 
@@ -2438,13 +2444,13 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	int w = User->mpCamera->mnWidth;
 	int h = User->mpCamera->mnHeight;
 
-	ObjectSLAM::InstanceMask* pGlobalMiss = nullptr;
+	////사용 안함
+	/*ObjectSLAM::InstanceMask* pGlobalMiss = nullptr;
 	std::map<int, ObjectSLAM::GlobalInstance*> mapMissGlobalIns;
-
 	if (pNewBF->mapMasks.Count("gmissing")) {
 		pGlobalMiss = pNewBF->mapMasks.Get("gmissing");
 		mapMissGlobalIns = pGlobalMiss->MapInstances.Get();
-	}
+	}*/
 
 	cv::Mat prevmask = cv::Mat::zeros(h, w, CV_8UC1);
 	cv::Mat currmask = cv::Mat::zeros(h, w, CV_8UC1);
@@ -2534,6 +2540,13 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	}
 
 	//샘 인스턴스 테스트
+
+	ObjectSLAM::AssociationManager::AssociationWithSAM(
+		SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pCurrSeg, mapSamInstances, true);
+
+	User->mnUsed--;
+	return;
+
 	int nSAM = 0;
 	for (auto pair : mapSamInstances)
 	{
@@ -2542,7 +2555,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 			nSAM++;
 		}
 	}
-	std::cout << "SAM TEST = " << nSAM << " " << mapSamInstances.size() << std::endl;
+	//std::cout << "SAM TEST = " << nSAM << " " << mapSamInstances.size() << std::endl;
 
 	//SLAM->VisualizeImage(mapName, nimg, 1);
 	////샘 인스턴스 생성 과정
@@ -2583,7 +2596,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		for (auto asso : vecResAsso)
 		{
 			auto id1 = asso->id1;
-			if (asso->nDataType != 1)
+			if (asso->nType1 != ObjectSLAM::InstanceType::SEG)
 				continue;
 			if (pair.first == id1)
 			{
@@ -2706,95 +2719,95 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	//std::cout << "sam::1" << std::endl;
 
 	//글로벌 미싱 인스턴스 매칭
-	for (auto pair : mapMissGlobalIns)
-	{
-		auto pG = pair.second;
-		bool bres = false;
+	//for (auto pair : mapMissGlobalIns)
+	//{
+	//	auto pG = pair.second;
+	//	bool bres = false;
 
-		std::pair<int, float> bestMatch;
-		bestMatch.first = -1;
-		bestMatch.second = 0.0;
+	//	std::pair<int, float> bestMatch;
+	//	bestMatch.first = -1;
+	//	bestMatch.second = 0.0;
 
-		//매칭 전처리
-		auto allMPs = pG->AllMapPoints.ConvertVector();
-		float n = allMPs.size();
-		if (n == 0)
-			continue;
+	//	//매칭 전처리
+	//	auto allMPs = pG->AllMapPoints.ConvertVector();
+	//	float n = allMPs.size();
+	//	if (n == 0)
+	//		continue;
 
-		std::vector<cv::Mat> vecMat;
-		pG->Update(vecMat);
-		
-		{
-			/*cv::Mat dir = pG->GetPosition() - pKF->GetCameraCenter();
-			auto res = Utils::CalcSphericalCoordinate(dir, 45.0, 0.1);
-			std::cout << pKF->mnId << " = sam spherical test = " << pG->mnId << " " << res << std::endl;*/
-		}
+	//	std::vector<cv::Mat> vecMat;
+	//	pG->Update(vecMat);
+	//	
+	//	{
+	//		/*cv::Mat dir = pG->GetPosition() - pKF->GetCameraCenter();
+	//		auto res = Utils::CalcSphericalCoordinate(dir, 45.0, 0.1);
+	//		std::cout << pKF->mnId << " = sam spherical test = " << pG->mnId << " " << res << std::endl;*/
+	//	}
 
-		auto pt = pG->ProjectPoint(T, K);
+	//	auto pt = pG->ProjectPoint(T, K);
 
-		std::vector<cv::Point2f> vec;
-		for (auto x : vecMat)
-		{
-			float d = 0.0;
-			cv::Point2f pt2;
-			bool bproj = CommonUtils::Geometry::ProjectPoint(pt2, d, x, K, R, t);
-			if (bproj && pt2.x < w && pt2.x > 0 && pt2.y < h && pt2.y > 0)
-			{
-				vec.push_back(pt2);
-			}
-		}
-		//매칭 전처리
-		for (auto sampair : mapSamInstances)
-		{
-			auto sid = sampair.first;
-			auto pSamIns = sampair.second;
-			const cv::Mat sammask = pSamIns->mask;
+	//	std::vector<cv::Point2f> vec;
+	//	for (auto x : vecMat)
+	//	{
+	//		float d = 0.0;
+	//		cv::Point2f pt2;
+	//		bool bproj = CommonUtils::Geometry::ProjectPoint(pt2, d, x, K, R, t);
+	//		if (bproj && pt2.x < w && pt2.x > 0 && pt2.y < h && pt2.y > 0)
+	//		{
+	//			vec.push_back(pt2);
+	//		}
+	//	}
+	//	//매칭 전처리
+	//	for (auto sampair : mapSamInstances)
+	//	{
+	//		auto sid = sampair.first;
+	//		auto pSamIns = sampair.second;
+	//		const cv::Mat sammask = pSamIns->mask;
 
-			if (sAlreadySamMatch.count(sampair.first))
-				continue;
+	//		if (sAlreadySamMatch.count(sampair.first))
+	//			continue;
 
-			if (cv::pointPolygonTest(pSamIns->contour, pt, false) < 0.0)
-				continue;
+	//		if (cv::pointPolygonTest(pSamIns->contour, pt, false) < 0.0)
+	//			continue;
 
-			//글로벌 인스턴스의 전체 맵포인트 매칭
-			float val = 0.0;
-			if (ObjectSLAM::InstanceSim::ComputSim(pSamIns->contour, vec, val))
-			{
-				bres = true;
-				sAlreadySamMatch.insert(pair.first);
-				
-				//프레임 인스턴스 추가
-				auto cid = pCurrSeg->mnMaxId++;
-				pCurrSeg->FrameInstances.Update(cid, pSamIns);
-				pCurrSeg->mask += (sammask / 255) * cid;
-				
-				//글로벌 인스턴스 업데이트
-				pCurrSeg->MapInstances.Update(cid, pG);
-				pG->Connect(pSamIns, pNewBF, cid);
-				//pG->EIFFilterOutlier();
-				/*pG->AddMapPoints(pSamIns->setMPs);
-				pG->Connect(pNewBF, cid);*/
+	//		//글로벌 인스턴스의 전체 맵포인트 매칭
+	//		float val = 0.0;
+	//		if (ObjectSLAM::InstanceSim::ComputSim(pSamIns->contour, vec, val))
+	//		{
+	//			bres = true;
+	//			sAlreadySamMatch.insert(pair.first);
+	//			
+	//			//프레임 인스턴스 추가
+	//			auto cid = pCurrSeg->mnMaxId++;
+	//			pCurrSeg->FrameInstances.Update(cid, pSamIns);
+	//			pCurrSeg->mask += (sammask / 255) * cid;
+	//			
+	//			//글로벌 인스턴스 업데이트
+	//			pCurrSeg->MapInstances.Update(cid, pG);
+	//			pG->Connect(pSamIns, pNewBF, cid);
+	//			//pG->EIFFilterOutlier();
+	//			/*pG->AddMapPoints(pSamIns->setMPs);
+	//			pG->Connect(pNewBF, cid);*/
 
-				pG->mnMatchFail = 0;
+	//			pG->mnMatchFail = 0;
 
-				std::stringstream ss;
-				ss << "sam,miss,global,success," << cid <<","<<sid << "," << pG->mnId << "," << val;
-				ObjSystem->vecObjectAssoRes.push_back(ss.str());
-				break;
-			}
-			if (bestMatch.second < val)
-			{
-				bestMatch.first = sampair.first;
-				bestMatch.second = val;
-			}
-		}
-		if (!bres)
-		{
-			std::stringstream ss;
-			ss << "sam,miss,global,fail, ," << bestMatch.first<< "," << pG->mnId << "," << bestMatch.second;
-			ObjSystem->vecObjectAssoRes.push_back(ss.str());
-		}
-	}
+	//			std::stringstream ss;
+	//			ss << "sam,miss,global,success," << cid <<","<<sid << "," << pG->mnId << "," << val;
+	//			ObjSystem->vecObjectAssoRes.push_back(ss.str());
+	//			break;
+	//		}
+	//		if (bestMatch.second < val)
+	//		{
+	//			bestMatch.first = sampair.first;
+	//			bestMatch.second = val;
+	//		}
+	//	}
+	//	if (!bres)
+	//	{
+	//		std::stringstream ss;
+	//		ss << "sam,miss,global,fail, ," << bestMatch.first<< "," << pG->mnId << "," << bestMatch.second;
+	//		ObjSystem->vecObjectAssoRes.push_back(ss.str());
+	//	}
+	//}
 
 	//std::cout << "sam::2" << std::endl;
 
@@ -3021,7 +3034,7 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 	//std::cout << "sam::6" << std::endl;
 
 	////시각화
-	ObjectSLAM::AssociationManager::VisualizeAssociation(SLAM, pNewBF, pPrevBF, pCurrSeg, pPrevSeg, mapName);
+	//ObjectSLAM::AssociationManager::VisualizeAssociation(SLAM, pNewBF, pPrevBF, pCurrSeg, pPrevSeg, mapName);
 	if(false)
 	{
 		auto pCurrInstance = pCurrSeg->FrameInstances.Get();
@@ -3047,8 +3060,8 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 			auto bSuccess = res->res;
 			auto bRequest = res->req;
 
-			if (res->nDataType != 1)
-				continue;
+			//if (res->nDataType != 1)
+			//	continue;
 
 			if (!bSuccess)
 			{
@@ -3077,8 +3090,8 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 			auto bSuccess = res->res;
 			auto bRequest = res->req;
 
-			if (res->nDataType != 1)
-				continue;
+			//if (res->nDataType != 1)
+			//	continue;
 
 			if (!bSuccess) {
 				continue;
@@ -3121,8 +3134,8 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		{
 			if (!res->res)
 				continue;
-			if (res->nDataType != 1)
-				continue;
+			//if (res->nDataType != 1)
+			//	continue;
 			int id1 = res->id1;
 			int id2 = res->id2;
 
@@ -3216,8 +3229,8 @@ void sam2(EdgeSLAM::SLAM* SLAM, std::string user, int id, long long received_ts,
 		{
 			for (auto res : vecResAsso)
 			{
-				if (res->nDataType != 1)
-					continue;
+				//if (res->nDataType != 1)
+				//	continue;
 				auto pid = res->id1;
 				auto pIns = pPrevInstance[pid];
 				auto textpt = pIns->pt;
@@ -3612,28 +3625,43 @@ void yoloseg(EdgeSLAM::SLAM* SLAM, std::string keyword, std::string user, int id
 	bool bAsso = false;
 	ObjectSLAM::InstanceMask* pPrevSeg = nullptr;
 	ObjectSLAM::BoxFrame* pPrevBF = nullptr;
-	if (pNewBF->mapMasks.Count("raft")) {
-		auto pRaft = pNewBF->mapMasks.Get("raft");
-
-		if (ObjSystem->MapKeyFrameNBoxFrame.Count(pRaft->id2))
+	////yoloseg(
+	{
+		pPrevBF = pNewBF->mpPrevBF;
+		if (pPrevBF && pPrevBF->mapMasks.Count("yoloseg"))
 		{
-			pPrevBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pRaft->id2);
-			
-			if (pPrevBF->mapMasks.Count("yoloseg"))
-			{
-				pPrevSeg = pPrevBF->mapMasks.Get("yoloseg");
-			}
+			pPrevSeg = pPrevBF->mapMasks.Get("yoloseg");
 
-			if (pPrevSeg && !pMask->bInit)
-			{
-				bAsso = true;
-				pMask->bInit = true;
-				AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSeg, pMask, pRaft, false);
-			}
+			ObjectSLAM::AssociationManager::AssociationWithMAP(
+				SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSeg, pMask, true);
 
 		}
-		
 	}
+	
+	//if (pNewBF->mapMasks.Count("raft")) {
+	//	auto pRaft = pNewBF->mapMasks.Get("raft");
+
+	//	if (ObjSystem->MapKeyFrameNBoxFrame.Count(pRaft->id2))
+	//	{
+	//		pPrevBF = ObjSystem->MapKeyFrameNBoxFrame.Get(pRaft->id2);
+	//		
+	//		if (pPrevBF->mapMasks.Count("yoloseg"))
+	//		{
+	//			pPrevSeg = pPrevBF->mapMasks.Get("yoloseg");
+	//		}
+
+	//		if (pPrevSeg && !pMask->bInit)
+	//		{
+	//			bAsso = true;
+	//			pMask->bInit = true;
+	//			//
+	//			ObjectSLAM::AssociationManager::AssociationWithMAP(
+	//				SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSeg, pMask, true);
+	//			//AssociateMissingObject2(SLAM, ObjSystem, "seg", id, mapName, user, pNewBF, pPrevBF, pPrevSeg, pMask, pRaft, false);
+	//		}
+
+	//	}
+	//}
 	
 	///////
 
