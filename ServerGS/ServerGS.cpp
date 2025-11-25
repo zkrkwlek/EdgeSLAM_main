@@ -35,6 +35,7 @@
 #include <vector>
 #include <Utils.h>
 #include <Utils_Geometry.h>
+#include <Utils_Serializer.h>
 
 #include <rapidjson\document.h>
 
@@ -51,6 +52,7 @@
 
 //GaussianSparseSLAM
 #include <GaussianSparseSLAM/include/Types.h>
+#include <GaussianSparseSLAM/include/Serializer.h>
 #include <GaussianSparseSLAM/include/GSSLAM.h>
 #include <GaussianSparseSLAM/include/User.h>
 #include <GaussianSparseSLAM/include/Map.h>
@@ -62,6 +64,9 @@
 #include <GaussianSparseSLAM/include/Initializer.h>
 #include <GaussianSparseSLAM/include/Tracker.h>
 #include <GaussianSparseSLAM/include/Mapper.h>
+
+//GaussianObject
+#include <GaussianSparseSLAM/include/Object/Object.h>
 
 //libtorch
 //#include <torch/torch.h>
@@ -282,6 +287,184 @@ void UpdateGSDepthFrame(GaussianSparseSLAM::GSSLAM* SLAM, std::string keyword, s
 
 }
 
+void yoloseg(GaussianSparseSLAM::GSSLAM* SLAM, std::string keyword, std::string user, int id, long long received_ts, bool bShow = false) {
+	
+	auto User = SLAM->GetUser(user);
+	if (!User) {
+		std::stringstream ss;
+		ss << "yoloseg,err," << id;
+		return;
+	}
+	User->mnUsed++;
+
+	std::string mapName = User->mapName;
+	bool bSave = User->mbSave;
+	bool bVis = User->GetVisID() == 0;
+
+	int w = User->mpCamera->mnWidth;
+	int h = User->mpCamera->mnHeight;
+	cv::Mat segcolor = cv::Mat::zeros(h, w, CV_8UC3);
+
+	int id2 = id - User->mnSkip;
+	if (!User->mFrames.Count(id) || !User->mFrames.Count(id2))
+	{
+		User->mnUsed--;
+		return;
+	}
+
+	auto fcurr = User->mFrames.Get(id);
+	auto fprev = User->mFrames.Get(id2);
+	auto pObjFrame = new GaussianSparseSLAM::ObjectFrame();
+
+	//객체 매칭 정보.
+	std::map<int, int> matchingIndex; //prev와 curr
+	std::map<int, int> mapPrevToCurr  , mapCurrToPrev; //프레임 매칭 정보가 다음 프레임에 어디인지
+	std::map<int, int> mapPrevToObject, mapCurrToObject; //각 프레임의 포인트가 어떤 오브젝트에 속하는지
+	std::map<int, int> mapObjectToPrev, mapObjectToCurr;
+	
+	cv::Mat nimg = cv::Mat::zeros(h, w, CV_8UC1);
+	{
+		std::stringstream ss;
+		ss << "/Download?keyword=yolosegc" << "&id=" << id << "&src=" << user;
+		WebAPI API("143.248.6.143", 35005);
+		auto res = API.Send(ss.str(), "");
+
+		cv::Mat temp = cv::Mat(res.size() / 2, 1, CV_16UC1, (void*)res.data());
+		int idx = 0;
+		std::vector<std::vector<cv::Point>> contours;
+		int insid = 0;
+
+		cv::Mat newBackground = cv::Mat::zeros(h, w, CV_8UC1);
+		while (true)
+		{
+			int iid = temp.at<ushort>(idx++);
+			int ni = temp.at<ushort>(idx++);
+
+			std::vector<cv::Point> contour;
+			for (int ti = 0; ti < ni; ti++)
+			{
+				auto x = temp.at<ushort>(idx++);
+				auto y = temp.at<ushort>(idx++);
+				contour.push_back(cv::Point(x, y));
+			}
+			//contour까지는 읽고 넘기기
+			if (iid == 60) {
+				if (idx == temp.rows)
+					break;
+				continue;
+			}
+
+			contours.push_back(contour);
+
+			//instance 생성
+			auto pIns = new GaussianSparseSLAM::FrameObject(nullptr);
+			pIns->contour = contour;
+
+			cv::Mat newmask = cv::Mat::zeros(h, w, CV_8UC1);;
+			cv::drawContours(newmask, contours, insid, cv::Scalar(255, 255, 255), -1);
+
+			pIns->mask = newmask.clone();
+			pIns->area = cv::countNonZero(newmask);
+			pIns->rect = cv::boundingRect(contour);
+			//pIns->rrect = cv::fitEllipse(contours[0]);
+
+			cv::Moments mu = cv::moments(contour, true);
+			pIns->pt = cv::Point2f(static_cast<float>(mu.m10 / (mu.m00 + 1e-5)),
+				static_cast<float>(mu.m01 / (mu.m00 + 1e-5)));
+
+			if (idx == temp.rows)
+				break;
+			
+			pObjFrame->FrameObjects.Update(++insid, pIns);
+			newBackground += (newmask / 255 * insid);
+
+			//임시로 이미지 시각화 할 때(삭제예정)
+			nimg += newmask;
+
+		}
+
+		auto pBackIns = new GaussianSparseSLAM::FrameObject(nullptr);
+		pBackIns->mask = newBackground == 0; //pMask->mask
+		pBackIns->area = cv::countNonZero(pBackIns->mask);
+		
+		pObjFrame->FrameObjects.Update(0, pBackIns);
+		pObjFrame->mask = nimg.clone();
+
+		//현재 프레임의 오브젝트에 포인트 할당
+		auto vecCurrObjects = pObjFrame->FrameObjects.Get();
+		for (int i = 0; i < fcurr->N; i++)
+		{
+			auto pt = fcurr->mvKeys[i].pt;
+			auto sid = pObjFrame->mask.at<uchar>(pt);
+
+			if (vecCurrObjects.count(sid) && sid > 0)
+			{
+				auto pObj = vecCurrObjects[sid];
+				pObj->vecPointIndexes.push_back(i);
+
+				for (int j = 0; j < pObj->vecPointIndexes.size(); j++)
+				{
+					auto pt = fcurr->mvKeys[pObj->vecPointIndexes[j]].pt;
+					cv::circle(nimg, pt, 2,cv::Scalar(255,0,0), -1);
+				}
+			}
+ 		}
+
+		//이전 프레임과 포인트 매칭 정보
+		//이게 없을 수도 있나? 확인이 필요함
+		
+		std::stringstream ssa;
+		ssa << "/Download?keyword=" << "resmatf" << "&id=" << id << "&src=" << user;
+		auto resa = API.Send(ssa.str(), "");
+		int num_pts = resa.size() / sizeof(cv::Point2i);
+		const cv::Point2i* ptr = reinterpret_cast<const cv::Point2i*>(resa.data());
+		std::vector<cv::Point2i> vecFrameMatches(ptr, ptr + num_pts);
+
+
+
+		//pMask->mnMaxId = contours.size() + 1;
+		//pMask->mnOriSize = contours.size();
+
+		////original backpu
+		//{
+		//	auto pPrevBF = pNewBF->mpPrevBF;
+		//	ObjectSLAM::AssoFramePairData* pData = nullptr;
+		//	if (pPrevBF)
+		//	{
+		//		pData = pNewBF->FromAsso.Get(pPrevBF->mnId);
+		//		if (pData && pData->mpFrameMapIns) {
+		//			ObjectSLAM::AssociationManager::AssociationWithSEG(SLAM, ObjSystem, "seg", mapName, user, pData);
+		//			ObjectSLAM::AssociationManager::AssociationWithLM(SLAM, ObjSystem, "seg", mapName, user, pData);
+
+		//		}
+		//	}
+		//}
+
+	}
+
+	SLAM->VisualizeImage(mapName, nimg, 1);
+	if (bVis) {
+		
+
+		/*auto pFrames = pMask->FrameInstances.Get();
+		for (auto pair : pFrames)
+		{
+			if (pair.first == 0)
+				continue;
+			int sid = pair.first;
+			auto pIns = pair.second;
+			std::vector<std::vector<cv::Point>> contours;
+			contours.push_back(pIns->contour);
+			cv::drawContours(img, contours, 0, SemanticSLAM::SemanticProcessor::SemanticColors[sid], 5);
+		}
+		std::stringstream ss;
+		ss << "../res/aseg/" << id << "_a.png";
+		cv::imwrite(ss.str(), img);*/
+	}
+	pObjFrame->mbProcess = true;
+	User->mnUsed--;
+}
+
 void UpdateDepthFrame(GaussianSparseSLAM::GSSLAM* SLAM, std::string keyword, std::string user, int id, long long received_ts, bool bShow = false) {
 	auto User = SLAM->GetUser(user);
 	if (!User) {
@@ -308,161 +491,220 @@ void UpdateDepthFrame(GaussianSparseSLAM::GSSLAM* SLAM, std::string keyword, std
 	auto mapStat = User->GetMap()->GetState();
 	auto userStat = User->GetState();
 
-	if (mapStat == GaussianSparseSLAM::MapState::NoImages || mapStat == GaussianSparseSLAM::MapState::NotInitialized)
+	auto f = User->mFrames.Get(id);
+	auto frameStat = f->GetState();
+	
+	
+	if (!f->mbDepth)
 	{
-		auto f = User->mFrames.Get(id);
-		auto pMap = User->GetMap();
-		auto frameStat = f->GetState();
+		f->mbDepth = true;
 
-		if (frameStat == GaussianSparseSLAM::FrameProcessStatus::initialization)
-		{
-			f->ComputeStereoFromRGBD(imDepth);
-			auto resInit = SLAM->mpInitializer->StereoInitialization(f, pMap);
-
-			pMap->SetState(resInit);
-
-			if (resInit == GaussianSparseSLAM::MapState::Initialized)
-			{
-				
-				//salad
-				{
-					std::stringstream ss2;
-					ss2 << User->strMapName << "." << user << ".GSImage." << id;
-					Utils::SendReqMessage("reqmapsalad", ss2.str(), f->mnKeyFrameId);
-				}
-
-				User->SetState(GaussianSparseSLAM::UserState::Success);
-
-				//keyframe
-				std::vector < cv::Vec2i> vecDatas;
-				auto vpGPs = f->mvGaussianPoints.get();
-				for (int i = 0; i < f->N; i++)
-				{
-					auto pGP = vpGPs[i];
-					if (!pGP || pGP->isBad())
-						continue;
-					vecDatas.push_back(cv::Vec2i(i, pGP->mnId));
-				}
-
-				//사용자 주변 키프레임
-				User->mpRefKF = SLAM->mpInitializer->mpInitKeyFrame1;
-				User->KeyFrames.Update(f->mnFrameID, SLAM->mpInitializer->mpInitKeyFrame1);
-				auto pNewKF = User->mpRefKF;
-				User->mpRefKF->sourceName = user;
-
-				//이전 프레임 갱신
-				User->prevFrame = f;
-				User->mnPrevFrameID = id;
-
-				//뎁스 쵝화
-				/*f->mvuRight = std::vector<float>(f->N, -1);
-				f->mvDepth = std::vector<float>(f->N, -1);
-				pNewKF->mvuRight = std::vector<float>(pNewKF->N, -1);
-				pNewKF->mvDepth = std::vector<float>(pNewKF->N, -1);*/
-
-				//서버에 정보 전송
-				//키프레임 옵저베이션
-				cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32SC2, vecDatas.data());
-				std::stringstream ss;
-				ss << User->mapName << "." << user << "." << f->mnFrameID;
-				Utils::SendData("kf_gp_ids", ss.str(), tmp, User->mpRefKF->mnId, 4, 2);
-				//인접 키프레임.
-				tmp = cv::Mat::ones(2000, 1, CV_32FC1) * -1;
-				Utils::SendData("reqmatches", ss.str(), tmp, User->mpRefKF->mnId, 4, 1);
-				
-
-				//가우시안 매핑에 키프레임 추가
-				{
-					
-					cv::Mat Pcw = pNewKF->GetPose();
-					cv::Mat kfdata = cv::Mat::zeros(1000, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
-					cv::Mat mpdata = cv::Mat::zeros(1, 1, CV_32FC1);
-					int nTrackData = 0;
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
-					kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
-					{
-						std::stringstream ss;
-						ss << User->mapName << "." << user << "." << pNewKF->mnFrameId;
-						Utils::SendData("datakfpose", ss.str(), kfdata, pNewKF->mnId, 4, 2);
-					}
-
-					std::vector<cv::Vec4f> vecDatas;
-					auto vpGPs = pNewKF->mvpMapPoints.get();
-					for (int i = 0; i < vpGPs.size(); i++) {
-						auto pGPi = vpGPs[i];
-						if (!pGPi || pGPi->isBad())
-							continue;
-						cv::Mat X = pGPi->GetWorldPos();
-						cv::Vec4f vec4(
-							static_cast<float>(id),
-							X.at<float>(0, 0),
-							X.at<float>(1, 0),
-							X.at<float>(2, 0)
-						);
-						vecDatas.push_back(vec4);
-					}
-					
-					{
-						std::stringstream ss;
-						ss << User->mapName << "." << user << "." << pNewKF->mnFrameId;
-						cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32FC4, vecDatas.data());
-						Utils::SendData("datasparsemap", ss.str(), tmp, pNewKF->mnId, 4, 4);
-					}
-
-					std::stringstream ss;
-					ss << User->mapName << "." << user << ".GSImage" << "." << pNewKF->mnFrameId;
-					Utils::SendReqMessage("reqgsmapping", ss.str(), pNewKF->mnId); //datakf
-
-					std::cout << "stereo initialization success " <<pNewKF->mnId<< std::endl;
-
-				}
-			}
-			else {
-				std::cout << "stereo init failed" << std::endl;
-			}
-		}
-	}
-	else if (mapStat == GaussianSparseSLAM::MapState::Initialized)
-	{
-		auto pKF = User->KeyFrames.Get(id);
-		if (!pKF)
-			std::cout << "keyframe error???" << std::endl;
-		if (pKF)
+		if (mapStat == GaussianSparseSLAM::MapState::NoImages || mapStat == GaussianSparseSLAM::MapState::NotInitialized)
 		{
 			auto pMap = User->GetMap();
-			pKF->ComputeStereoFromRGBD(imDepth);
 
-			//가우시안 스플래팅 요청
-			int nKF = pMap->GetNumKeyFrames();
-			if (nKF > 2)
+			if (frameStat == GaussianSparseSLAM::FrameProcessStatus::initialization)
 			{
+				f->ComputeStereoFromRGBD(imDepth);
+				auto resInit = SLAM->mpInitializer->StereoInitialization(f, pMap);
 
+				pMap->SetState(resInit);
+
+				if (resInit == GaussianSparseSLAM::MapState::Initialized)
+				{
+					//salad
+					{
+						std::stringstream ss2;
+						ss2 << User->strMapName << "." << user << ".GSImage." << id;
+						Utils::SendReqMessage("reqmapsalad", ss2.str(), f->mnKeyFrameId);
+					}
+					User->SetState(GaussianSparseSLAM::UserState::Success);
+
+					//사용자 주변 키프레임
+					User->mpRefKF = SLAM->mpInitializer->mpInitKeyFrame1;
+					User->KeyFrames.Update(f->mnFrameID, SLAM->mpInitializer->mpInitKeyFrame1);
+					auto pNewKF = User->mpRefKF;
+					User->mpRefKF->sourceName = user;
+
+					//이전 프레임 갱신
+					//User->prevFrame = f;
+					//User->mnPrevFrameID = id;//쌍안초기화
+
+					//뎁스 쵝화
+					/*f->mvuRight = std::vector<float>(f->N, -1);
+					f->mvDepth = std::vector<float>(f->N, -1);
+					pNewKF->mvuRight = std::vector<float>(pNewKF->N, -1);
+					pNewKF->mvDepth = std::vector<float>(pNewKF->N, -1);*/
+
+					//서버에 정보 전송
+					//키프레임 옵저베이션
+					std::vector < cv::Vec2i> vecDatas;
+					auto vpGPs = f->mvGaussianPoints.get();
+					for (int i = 0; i < f->N; i++)
+					{
+						auto pGP = vpGPs[i];
+						if (!pGP || pGP->isBad())
+							continue;
+						vecDatas.push_back(cv::Vec2i(i, pGP->mnId));
+					}
+					cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32SC2, vecDatas.data());
+					std::stringstream ss;
+					ss << User->mapName << "." << user << "." << f->mnFrameID;
+					Utils::SendData("kf_gp_ids", ss.str(), tmp, User->mpRefKF->mnId, 4, 2);
+					//인접 키프레임.
+					tmp = cv::Mat::ones(2000, 1, CV_32FC1) * -1;
+					Utils::SendData("reqmatches", ss.str(), tmp, User->mpRefKF->mnId, 4, 1);
+
+					//가우시안 매핑에 키프레임 추가
+					{
+
+						//cv::Mat Pcw = pNewKF->GetPose();
+						//cv::Mat kfdata = cv::Mat::zeros(1000, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
+						//cv::Mat mpdata = cv::Mat::zeros(1, 1, CV_32FC1);
+						//int nTrackData = 0;
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
+						//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
+						//{
+						//	std::stringstream ss;
+						//	ss << User->mapName << "." << user << "." << pNewKF->mnFrameId;
+						//	Utils::SendData("datakfpose", ss.str(), kfdata, pNewKF->mnId, 4, 2);
+						//}
+
+						std::vector<cv::Vec4f> vecDatas;
+						auto vpGPs = pNewKF->mvpMapPoints.get();
+						for (int i = 0; i < vpGPs.size(); i++) {
+							auto pGPi = vpGPs[i];
+							if (!pGPi || pGPi->isBad())
+								continue;
+							cv::Mat X = pGPi->GetWorldPos();
+							cv::Vec4f vec4(
+								static_cast<float>(id),
+								X.at<float>(0, 0),
+								X.at<float>(1, 0),
+								X.at<float>(2, 0)
+							);
+							vecDatas.push_back(vec4);
+						}
+
+						{
+							std::stringstream ss;
+							ss << User->mapName << "." << user << "." << pNewKF->mnFrameId;
+							cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32FC4, vecDatas.data());
+							Utils::SendData("datasparsemap", ss.str(), tmp, pNewKF->mnId, 4, 4);
+						}
+
+						std::vector<PoseKeyframeData> keyframes;
+						std::vector<GaussianSparseSLAM::KeyFrame*> vpNeighKFs;
+						vpNeighKFs.push_back(pNewKF);
+						for (auto pNeighKF : vpNeighKFs)
+						{
+							PoseKeyframeData kf;      
+							kf.frame_id = pNeighKF->mnId;
+							kf.R = pNeighKF->GetRotation();
+							kf.t = pNeighKF->GetTranslation();
+							kf.R.convertTo(kf.R, CV_64FC1);
+							kf.t.convertTo(kf.t, CV_64FC1);
+							keyframes.push_back(kf);
+						}
+						std::vector<uint8_t> buffer;
+						CommonUtils::PoseSerializer::serialize(buffer, keyframes);
+						Utils::SendData("datakfpose", ss.str(), buffer, pNewKF->mnId);
+
+						std::stringstream ss;
+						ss << User->mapName << "." << user << ".GSImage" << "." << pNewKF->mnFrameId;
+						Utils::SendReqMessage("reqgsmapping", ss.str(), pNewKF->mnId); //datakf
+
+						std::cout << "stereo initialization success " << pNewKF->mnId << std::endl;
+
+					}
+				}
+				else {
+					std::cout << "stereo init failed" << std::endl;
+				}
 			}
 		}
+		else if (mapStat == GaussianSparseSLAM::MapState::Initialized)
+		{
+			//calculate scale
+			{
+				cv::Mat R = f->GetRotation();
+				cv::Mat t = f->GetTranslation();
+				cv::Mat K = f->mpCamera->K.clone();
+
+				std::vector<float> vecDepths;
+				std::vector<std::pair<cv::Point2f, cv::Point3f>> vecPairs;
+
+				auto vpGPs = f->mvGaussianPoints.get();
+
+				if (vpGPs.size() == f->N)
+				{
+					for (int i = 0; i < f->N; i++)
+					{
+						auto pGP = vpGPs[i];
+						if (!pGP || pGP->isBad() || f->mvbOutliers[i])
+							continue;
+						auto pt = f->mvKeys[i].pt;
+						float d = imDepth.at<float>(pt);
+
+						if (d < 0.01)
+							continue;
+						cv::Point3f x3D(pGP->GetWorldPos());
+						vecDepths.push_back(d);
+						vecPairs.push_back(std::make_pair(pt, x3D));
+					}
+
+					float scale = (float)CommonUtils::Geometry::ComputeScaleWithSLAM(vecDepths, vecPairs, R, t, K);
+					f->ComputeStereoFromRGBD(imDepth * scale);
+					f->mfScale = scale;
+					//std::cout << "COmputeScale = " << scale << std::endl;
+				}
+			}
+
+			if (frameStat == GaussianSparseSLAM::FrameProcessStatus::mapping)
+			{
+				auto pKF = User->KeyFrames.Get(id);
+				if (!pKF)
+					std::cout << "keyframe error???" << std::endl;
+				if (pKF)
+				{
+					auto pMap = User->GetMap();
+					pKF->ComputeStereoFromRGBD(imDepth);
+
+					//가우시안 스플래팅 요청
+					int nKF = pMap->GetNumKeyFrames();
+					if (nKF > 2)
+					{
+
+					}
+				}
+			}
+		}
+
+		////뎁스 시각화
+		// 최소/최대 깊이 값 계산 
+		double minVal, maxVal;
+		cv::minMaxLoc(normalizedDepth, &minVal, &maxVal);
+
+		// 0~255 범위로 정규화
+		normalizedDepth = (normalizedDepth - minVal) / (maxVal - minVal) * 255;
+		normalizedDepth.convertTo(normalizedDepth, CV_8U);
+
+		cv::Mat depthColor;
+		cv::applyColorMap(normalizedDepth, depthColor, cv::COLORMAP_JET);
+		SLAM->VisualizeImage(User->mapName, depthColor, 3);
+
 	}
-
-	////뎁스 시각화
-	// 최소/최대 깊이 값 계산 
-	double minVal, maxVal;
-	cv::minMaxLoc(normalizedDepth, &minVal, &maxVal);
-
-	// 0~255 범위로 정규화
-	normalizedDepth = (normalizedDepth - minVal) / (maxVal - minVal) * 255;
-	normalizedDepth.convertTo(normalizedDepth, CV_8U);
-
-	cv::Mat depthColor;
-	cv::applyColorMap(normalizedDepth, depthColor, cv::COLORMAP_JET);
-	SLAM->VisualizeImage(User->mapName, depthColor, 3);
+	
 	////뎁스 시각화
 	User->mnUsed--;
 }
@@ -491,33 +733,33 @@ void GaussianSparseMapping(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSS
 	auto pNewKF = User->KeyFrames.Get(id);
 	User->mpRefKF = pNewKF;
 	User->mbNewKF = true;
-	auto future = POOL->EnqueueJob(GaussianSparseSLAM::Mapper::ProcessMapping, POOL, SLAM, User->mapName, pNewKF, true); //frame
+	auto future = POOL->EnqueueJob(GaussianSparseSLAM::Mapper::ProcessMapping, POOL, SLAM, User->mapName, pNewKF, pNewKF->mbBA.load()); //frame
 	future.get();
 	//맵 전송
 
 	//매핑 요청. 인접키프레임 아이디를 넘길가?
 	//맵데이터, 포즈 등을 넘기기
-	cv::Mat Pcw = pNewKF->GetPose();
-	cv::Mat kfdata = cv::Mat::zeros(1000, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
-	cv::Mat mpdata = cv::Mat::zeros(1, 1, CV_32FC1);
-	int nTrackData = 0;
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
-	kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
-	{
-		std::stringstream ss;
-		ss << User->mapName<< "." << src << "." << pNewKF->mnFrameId;
-		Utils::SendData("datakfpose", ss.str(), kfdata, pNewKF->mnId, 4, 2);
-	}
+	//cv::Mat Pcw = pNewKF->GetPose();
+	//cv::Mat kfdata = cv::Mat::zeros(1000, 1, CV_32FC1); //inlier, pose + point2f, octave, angle, point3f
+	//cv::Mat mpdata = cv::Mat::zeros(1, 1, CV_32FC1);
+	//int nTrackData = 0;
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 0);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 1);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 2);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 0);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 1);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 2);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 0);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 1);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 2);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(0, 3);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(1, 3);
+	//kfdata.at<float>(nTrackData++) = Pcw.at<float>(2, 3);
+	//{
+	//	std::stringstream ss;
+	//	ss << User->mapName<< "." << src << "." << pNewKF->mnFrameId;
+	//	Utils::SendData("datakfpose", ss.str(), kfdata, pNewKF->mnId, 4, 2);
+	//}
 
 	std::vector<cv::Vec4f> vecDatas;
 	auto vpGPs = pNewKF->mvpMapPoints.get();
@@ -547,6 +789,22 @@ void GaussianSparseMapping(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSS
 		}
 		cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32FC4, vecDatas.data());
 		Utils::SendData("datasparsemap", ss.str(), tmp, pNewKF->mnId, 4, 4);
+
+		std::vector<PoseKeyframeData> keyframes;
+		vpNeighKFs.push_back(pNewKF);
+		for (auto pNeighKF : vpNeighKFs)
+		{
+			PoseKeyframeData kf;
+			kf.frame_id = pNeighKF->mnId;
+			kf.R = pNeighKF->GetRotation();
+			kf.t = pNeighKF->GetTranslation();
+			kf.R.convertTo(kf.R, CV_64FC1);
+			kf.t.convertTo(kf.t, CV_64FC1);
+			keyframes.push_back(kf);
+		}
+		std::vector<uint8_t> buffer;
+		CommonUtils::PoseSerializer::serialize(buffer, keyframes);
+		Utils::SendData("datakfpose", ss.str(), buffer, pNewKF->mnId);
 	}
 	 
 	std::stringstream ss;
@@ -659,9 +917,9 @@ void TrackWithKeyFrames(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM
 	
 	int nInliers = GaussianSparseSLAM::Tracker::Track(POOL, SLAM, id, user, f2, frame_ts);
 	
-	User->mnPrevFrameID = User->mnCurrFrameID.load();
-	User->mnCurrFrameID = f2->mnFrameID;
-	User->prevFrame = f2;
+	//User->mnPrevFrameID = User->mnCurrFrameID.load(); //맵매치
+	//User->mnCurrFrameID = f2->mnFrameID;
+	//User->prevFrame = f2;
 	
 	std::set<int> sTemporalIdxs;
 	if (User->GetState() == GaussianSparseSLAM::UserState::Success)
@@ -699,6 +957,440 @@ void Track(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM* SLAM, std::
 
 	User->mnUsed--;
 }
+void TrackWithLocalMap(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM* SLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
+
+	auto vecstr = split(src, '.');
+	std::string user = vecstr[0];
+
+	if (!SLAM->CheckUser(user)) {
+		return;
+	}
+	auto User = SLAM->GetUser(user);
+	if (!User)
+		return;
+	User->mnUsed++;
+
+	std::string mapName = User->mapName;
+	auto map = User->GetMap();
+
+	WebAPI API(ip, port);
+	std::vector<cv::Point2i> vecRefKF, vecPrevFrame;
+	std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+
+	std::stringstream ss;
+	ss << "/Download?keyword=" << "resmatf" << "&id=" << id << "&src=" << src;
+	auto res = API.Send(ss.str(), "");
+	int num_pts = res.size() / sizeof(cv::Point2i);
+	const cv::Point2i* ptr = reinterpret_cast<const cv::Point2i*>(res.data());
+	std::vector<cv::Point2i> vecFrameMatches(ptr, ptr + num_pts);
+
+	auto f2 = User->mFrames.Get(id);
+
+	if (map->GetState() == GaussianSparseSLAM::MapState::NotInitialized)
+	{
+		auto resInit = SLAM->mpInitializer->MonocularInitializationWithMatch(f2, map, vecFrameMatches);
+
+		if (resInit == GaussianSparseSLAM::MapState::Initialized)
+		{
+			map->SetState(resInit);
+
+			//salad
+			{
+				std::stringstream ss2;
+				ss2 << User->strMapName << "." << user << ".GSImage." << id;
+				Utils::SendReqMessage("reqmapsalad", ss2.str(), f2->mnKeyFrameId);
+			}
+
+			User->SetState(GaussianSparseSLAM::UserState::Success);
+
+			//keyframe
+			std::vector < cv::Vec2i> vecDatas;
+			auto vpGPs = f2->mvGaussianPoints.get();
+			for (int i = 0; i < f2->N; i++)
+			{
+				auto pGP = vpGPs[i];
+				if (!pGP || pGP->isBad())
+					continue;
+				vecDatas.push_back(cv::Vec2i(i, pGP->mnId));
+			}
+
+			//사용자 주변 키프레임
+			auto kf1 = SLAM->mpInitializer->mpInitKeyFrame1;
+			auto kf2 = SLAM->mpInitializer->mpInitKeyFrame2;
+
+			kf1->sourceName = user;
+			kf2->sourceName = user;
+
+			map->mvpKeyFrameOrigins.push_back(kf1);
+
+			User->mpRefKF = SLAM->mpInitializer->mpInitKeyFrame2;
+			User->KeyFrames.Update(f2->mnFrameID, SLAM->mpInitializer->mpInitKeyFrame2);
+			map->mnLastKeyFrameID = f2->mnFrameID;
+
+			//frame 갱신
+			/*auto vpMPs = f->mvGaussianPoints.get();
+			for (int i = 0; i < f->N; i++)
+			{
+
+				if(f->mv)
+			}*/
+
+			cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32SC2, vecDatas.data());
+			std::stringstream ss;
+			ss << User->mapName << "." << user << "." << f2->mnFrameID;
+			Utils::SendData("kf_gp_ids", ss.str(), tmp, kf1->mnId, 4, 2);
+			Utils::SendData("kf_gp_ids", ss.str(), tmp, kf2->mnId, 4, 2);
+			//인접 키프레임.
+			tmp = cv::Mat::ones(2000, 1, CV_32FC1) * -1;
+			Utils::SendData("reqmatches", ss.str(), tmp, kf1->mnId, 4, 1);
+			Utils::SendData("reqmatches", ss.str(), tmp, kf2->mnId, 4, 1);
+
+			////이전 프레임 갱신
+			//User->prevFrame = f;
+			//User->mnPrevFrameID = id;//단안초기화
+		}
+	}
+	else{
+		
+		f2->reset_map_points();
+		f2->SetPose(User->PredictPose());
+
+		std::set<GaussianSparseSLAM::GaussianPoint*> spGPs;
+		std::set<int> sAleadyIdxs;
+
+		int idPrevFrame = std::stoi(vecstr[2]);
+		int id2 = id - User->mnSkip;//prev
+
+		//매칭 시각화 용도
+
+		//VO 
+		std::list<GaussianSparseSLAM::GaussianPoint*> lpTemporalPoints;
+		std::vector<std::pair<float, int> > vDepthIdx;
+		//prev
+		{
+			auto fprev = User->mFrames.Get(id2);
+			auto pMap = User->GetMap();
+
+			//std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+			//long long ts = start.time_since_epoch().count();
+			//auto vpPrevGPs = fprev->mvGaussianPoints.get();
+			//for (int i = 0; i < fprev->N; i++)
+			//{
+			//	float z = fprev->mvDepth[i];
+
+			//	auto pGP = vpPrevGPs[i];
+			//	if (pGP && !pGP->isBad() && pGP->Observations() >= 1 && !fprev->mvbOutliers[i])
+			//		continue;
+
+			//	if (z > 0)
+			//	{
+			//		vDepthIdx.push_back(std::make_pair(z, i));
+			//	}
+			//}
+
+			//std::sort(vDepthIdx.begin(), vDepthIdx.end());
+			//int nPoints = 0;
+			//int nMaxPoints = 200;
+
+			//cv::Mat Rcw1 = fprev->GetRotation();
+			//cv::Mat Rwc1 = Rcw1.t();
+			//cv::Mat twc1 = fprev->GetCameraCenter();
+
+			//for (size_t j = 0; j < vDepthIdx.size(); j++)
+			//{
+			//	int i = vDepthIdx[j].second;
+
+			//	bool bCreateNew = true;
+
+			//	/*MapPoint* pMP =
+
+			//	if (!pMP)
+			//		bCreateNew = true;
+			//	else if (pMP->Observations() < 1)
+			//		bCreateNew = true;*/
+
+			//	if (bCreateNew)
+			//	{
+
+			//		cv::Mat x3D;
+			//		x3D = fprev->UnprojectStereo(i, Rwc1, twc1);
+			//		GaussianSparseSLAM::GaussianPoint* pMP = new GaussianSparseSLAM::GaussianPoint(x3D, fprev, pMap, ts);
+
+			//		//fprev->mvGaussianPoints.update(i, pMP);
+			//		vpPrevGPs[i] = pMP;
+			//		lpTemporalPoints.push_back(pMP);
+			//		nPoints++;
+			//	}
+			//	else
+			//	{
+			//		nPoints++;   
+			//	}
+
+			//	if (vDepthIdx[j].first > fprev->mThDepth && nPoints >= nMaxPoints)
+			//		break;
+
+			//}
+			
+			if (fprev->mbKF) {
+				auto pPrevKF = map->GetKeyFrame(fprev->mnKeyFrameId );
+				if(pPrevKF){
+					GaussianSparseSLAM::Tracker::CreateTemporalPointsWithGridDistribution(pPrevKF, fprev, pMap, lpTemporalPoints, vecFrameMatches, 300);
+				}
+				else
+					GaussianSparseSLAM::Tracker::CreateTemporalPointsWithGridDistribution(fprev, pMap, lpTemporalPoints, vecFrameMatches, 300);
+			}else
+				GaussianSparseSLAM::Tracker::CreateTemporalPointsWithGridDistribution(fprev, pMap, lpTemporalPoints, vecFrameMatches, 300);
+
+			auto vpPrevGPs = fprev->mvGaussianPoints.get();
+
+			//auto vpPrevGPs = fprev->mvGaussianPoints.get();
+			for (auto match : vecFrameMatches)
+			{
+				int i1 = match.x;
+				int i2 = match.y;
+				if (i1 >= vpPrevGPs.size())
+					std::cout << "error::prev match = " << i1 << " " << vpPrevGPs.size() << "==" << idPrevFrame << " " << fprev->mnFrameID << " " << std::endl;
+				auto pMP = vpPrevGPs[i1];
+				if (!pMP || pMP->isBad() || spGPs.count(pMP) || sAleadyIdxs.count(i2))
+					continue;
+				spGPs.insert(pMP);
+				sAleadyIdxs.insert(i2);
+
+				f2->mvGaussianPoints.update(i2, pMP);
+			}
+
+
+			//프레임 맵포인트 시각화
+			/*cv::Mat tempa = User->ImageDatas.Get(id);
+			cv::Mat imga = cv::imdecode(tempa, cv::IMREAD_COLOR);
+			cv::Mat K = f2->mpCamera->K;
+			auto vecCurrGPs = f2->mvGaussianPoints.get();
+
+			cv::Mat T = f2->GetPose();
+			cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
+			cv::Mat   t = T.rowRange(0, 3).col(3);
+			for (int i = 0; i < f2->N; i++)
+			{
+				auto pMPi = vecCurrGPs[i];
+				if (!pMPi || pMPi->isBad())
+					continue;
+				auto pt1 = f2->mvKeys[i].pt;
+				cv::Point2f pt2;
+
+				cv::Mat p3Dw = pMPi->GetWorldPos();
+				float d2 = 0.0;
+				CommonUtils::Geometry::ProjectPoint(pt2, d2, p3Dw, K, R, t);
+
+				cv::line(imga, pt1, pt2, cv::Scalar(0, 0, 255), 2);
+			}
+			SLAM->VisualizeImage(mapName, imga, 6);*/
+
+			//이전 프레임과 매칭 시각화
+			int id2 = fprev->mnFrameID;
+			cv::Mat temp1 = User->ImageDatas.Get(id);
+			cv::Mat img1 = cv::imdecode(temp1, cv::IMREAD_COLOR);
+			cv::Mat visImg1 = img1.clone();
+			cv::Mat temp2 = User->ImageDatas.Get(id2);
+			cv::Mat img2 = cv::imdecode(temp2, cv::IMREAD_COLOR);
+			cv::Mat visImg2 = img2.clone();
+
+			std::vector<std::pair<cv::Point2f, cv::Point2f>> matches2;
+			for (auto match : vecFrameMatches)
+			{
+				int i1 = match.x;
+				int i2 = match.y;
+				auto pt1 = f2->mvKeys[i2].pt;
+				auto pt2 = fprev->mvKeys[i1].pt;
+				matches2.push_back(std::make_pair(pt1, pt2));
+			}
+			cv::Mat resv;
+			SLAM->VisualizeMatchingImage(resv, img1, img2, matches2, mapName, 4, 5);
+		}
+
+		//lm
+		int nLocal = 0;
+		if (User->mmpLocalGPs.Count(id2))
+		{
+			std::stringstream ss;
+			ss << "/Download?keyword=" << "resmatlm" << "&id=" << id << "&src=" << user;
+			auto res = API.Send(ss.str(), "");
+			int num_pts = res.size() / sizeof(cv::Point2i);
+			const cv::Point2i* ptr = reinterpret_cast<const cv::Point2i*>(res.data());
+			std::vector<cv::Point2i> vecLocalMapMatches(ptr, ptr + num_pts);
+
+			auto vpLocalGPs = User->mmpLocalGPs.Get(id2);
+			std::set<int> snLocalMPIDs;
+						
+			for (auto match : vecLocalMapMatches)
+			{
+				int i1 = match.x;
+				int i2 = match.y;
+
+				if (i1 >= vpLocalGPs.size())
+				{
+					std::cout << "error::local map = " << i1 << ", " << vpLocalGPs.size() << "==" << id2 << " " << idPrevFrame << std::endl;// User->prevFrame->mnFrameID << " " << User->mnPrevFrameID << std::endl;
+				}
+
+				auto pMP = vpLocalGPs[i1];
+				if (!pMP || pMP->isBad() || spGPs.count(pMP) || sAleadyIdxs.count(i2))
+					continue;
+				spGPs.insert(pMP);
+				sAleadyIdxs.insert(i2);
+
+				f2->mvGaussianPoints.update(i2, pMP);
+
+				snLocalMPIDs.insert(i2);
+				nLocal++;
+			}
+
+			//트래킹 전에 매칭 시각화
+			{
+				cv::Mat K = f2->mpCamera->K;
+				auto vecCurrGPs = f2->mvGaussianPoints.get();
+
+				cv::Mat T = f2->GetPose();
+				cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
+				cv::Mat t = T.rowRange(0, 3).col(3);
+
+				cv::Mat temp1 = User->ImageDatas.Get(id);
+				cv::Mat img1 = cv::imdecode(temp1, cv::IMREAD_COLOR);
+				cv::Mat visImg1 = img1.clone();
+				auto vpGPs = f2->mvGaussianPoints.get();
+				for (int i = 0; i < f2->N; i++)
+				{
+					cv::circle(visImg1, f2->mvKeys[i].pt, 1, cv::Scalar(0, 0, 255), -1);
+					auto pGPi = vpGPs[i];
+
+					if (!pGPi || pGPi->isBad()) {
+						continue;
+					}
+					cv::circle(visImg1, f2->mvKeys[i].pt, 3, cv::Scalar(0, 255, 0), -1);
+
+					auto pt1 = f2->mvKeys[i].pt;
+					cv::Point2f pt2;
+					cv::Mat p3Dw = pGPi->GetWorldPos();
+					float d2 = 0.0;
+					CommonUtils::Geometry::ProjectPoint(pt2, d2, p3Dw, K, R, t);
+					if(pGPi->Observations() == 0)
+						cv::line(visImg1, pt1, pt2, cv::Scalar(0, 255, 255), 3);
+					else if(snLocalMPIDs.count(i))
+						cv::line(visImg1, pt1, pt2, cv::Scalar(255, 255, 0), 2);
+					else
+						cv::line(visImg1, pt1, pt2, cv::Scalar(255, 0, 0), 2);
+				}
+				SLAM->VisualizeImage(mapName, visImg1, 6);
+			}
+
+			//std::cout << "Local Map 매치 = " << id << " = " << vecLocalMapMatches.size()<<", " << vpLocalGPs.size() << std::endl;;
+			//std::cout << "lm match = " << vecLocalMapMatches.size() << " " << spGPs.size() << std::endl;
+			User->mmpLocalGPs.Erase(id2);
+		}
+		f2->check_replaced_map_points();
+		//로컬맵 id와 연결.
+
+		//tracking
+		int nInliers = GaussianSparseSLAM::Tracker::Track(POOL, SLAM, id, user, f2, frame_ts);
+
+		std::cout << "track test = " << id << " " << nInliers <<" =  "<<spGPs.size()<<", " << nLocal <<" ::"<< lpTemporalPoints.size() << std::endl;
+
+		// Clean VO matches
+		int nVOMatch = 0;
+		
+		// Delete temporal MapPoints
+		for (std::list<GaussianSparseSLAM::GaussianPoint*>::iterator lit = lpTemporalPoints.begin(), lend = lpTemporalPoints.end(); lit != lend; lit++)
+		{
+			auto pMP = *lit;
+			if(pMP->Observations() == 0)
+				delete pMP;
+		}
+
+		//후속 처리
+		if (User->GetState() == GaussianSparseSLAM::UserState::Success)
+		{
+			//keyframe check
+			////check keyframe
+			if (User->mbMapping && User->mpRefKF) {
+				if (GaussianSparseSLAM::Tracker::NeedNewKeyFrame(map, f2, User->mpRefKF, nInliers, map->mnLastKeyFrameID.load(), User->mnLastRelocFrameId.load(), false, User->mpCamera->mnMaxFrame, User->mpCamera->mnMinFrame)) {
+					GaussianSparseSLAM::Tracker::CreateNewKeyFrame(POOL, SLAM, map, f2, User);
+					f2->SetState(GaussianSparseSLAM::FrameProcessStatus::mapping);
+				}
+			}
+			//std::cout << "tracking success " << id <<" "<<nInliers << std::endl;
+
+			//update local map
+			std::vector<GaussianSparseSLAM::KeyFrame*> vpKFs;
+			std::vector<GaussianSparseSLAM::GaussianPoint*> vpMPs;
+
+			GaussianSparseSLAM::KeyFrame* pRefKF = nullptr;
+			cv::Mat desc;
+			std::vector<LocalKeyframeData> vecLocalKeyframeDatas;
+			std::vector<uint8_t> buffer;
+
+			GaussianSparseSLAM::Tracker::UpdateLocalKeyFrames(f2, vpKFs, pRefKF);
+			GaussianSparseSLAM::Tracker::UpdateLocalMapPoitns(f2, vpKFs, vpMPs, desc, vecLocalKeyframeDatas);
+			GaussianSparseSLAM::KeyframeSerializer::serialize(buffer, vecLocalKeyframeDatas);
+			Utils::SendData("reslocalmap", user, buffer, id);
+			User->mmpLocalGPs.Update(id, vpMPs);
+			//std::cout << "Local Map 생성 = " << id << " " << vpMPs.size() << std::endl;;
+
+			User->mLocalMapDescriptor = desc.clone();
+
+			if (pRefKF)
+			{
+				User->mpRefKF = pRefKF;
+			}
+		}
+
+		if (!f2->mbDepth &&  f2->GetState() == GaussianSparseSLAM::FrameProcessStatus::mapping)
+		{
+			std::string tsrc = user + ".GSImage";
+			Utils::SendReqMessage("requnidepth", tsrc, id);
+			//Utils::SendReqMessage("reqyoloseg", tsrc, id);
+			{
+				std::stringstream ss2;
+				ss2 << mapName << "." << user << ".GSImage." << id;
+				Utils::SendReqMessage("reqmapsalad", ss2.str(), f2->mnKeyFrameId);
+			}
+		}
+
+		int nVisID = User->GetVisID() + 7;
+
+		//visualization
+
+		{
+			cv::Mat K = f2->mpCamera->K;
+			auto vecCurrGPs = f2->mvGaussianPoints.get();
+
+			cv::Mat T = f2->GetPose();
+			cv::Mat R = T.rowRange(0, 3).colRange(0, 3);
+			cv::Mat t = T.rowRange(0, 3).col(3);
+
+			cv::Mat temp1 = User->ImageDatas.Get(id);
+			cv::Mat img1 = cv::imdecode(temp1, cv::IMREAD_COLOR);
+			cv::Mat visImg1 = img1.clone();
+			auto vpGPs = f2->mvGaussianPoints.get();
+			for (int i = 0; i < f2->N; i++)
+			{
+				cv::circle(visImg1, f2->mvKeys[i].pt, 1, cv::Scalar(0, 0, 255), -1);
+				auto pGPi = vpGPs[i];
+
+				if (!pGPi || pGPi->isBad() || f2->mvbOutliers[i]) {
+					continue;
+				}
+				cv::circle(visImg1, f2->mvKeys[i].pt, 3, cv::Scalar(0, 255, 0), -1);
+
+				auto pt1 = f2->mvKeys[i].pt;
+				cv::Point2f pt2;
+				cv::Mat p3Dw = pGPi->GetWorldPos();
+				float d2 = 0.0;
+				CommonUtils::Geometry::ProjectPoint(pt2, d2, p3Dw, K, R, t);
+				cv::line(visImg1, pt1, pt2, cv::Scalar(255, 0, 0), 2);
+			}
+			SLAM->VisualizeImage(mapName, visImg1, nVisID);
+		}
+	}
+}
+
 void TrackWithPrevFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM* SLAM, std::string src, std::string url, int id, double received_ts, double frame_ts) {
 
 	auto vecstr = split(src, '.');
@@ -758,11 +1450,76 @@ void TrackWithPrevFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM
 	auto f2 = User->mFrames.Get(id);
 	f2->reset_map_points();
 
+	//VO 
+	std::list<GaussianSparseSLAM::GaussianPoint*> lpTemporalPoints;
+	std::vector<std::pair<float, int> > vDepthIdx;
+
 	std::set<GaussianSparseSLAM::GaussianPoint*> spGPs;
 	std::set<int> sAleadyIdxs;
 	if (bPrevMatch)
 	{
+		//VO
 		auto fprev = User->mFrames.Get(idPrevFrame);
+		std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+		long long ts = start.time_since_epoch().count();
+		auto pMap = User->GetMap();
+		auto vpGPs = fprev->mvGaussianPoints.get();
+		for (int i = 0; i < fprev->N; i++)
+		{
+			float z = fprev->mvDepth[i];
+
+			auto pGP = vpGPs[i];
+			if (pGP && !pGP->isBad() && pGP->Observations() >= 1 && !fprev->mvbOutliers[i])
+				continue;
+
+			if (z > 0)
+			{
+				vDepthIdx.push_back(std::make_pair(z, i));
+			}
+		}
+
+		std::cout << "VO test = " << vDepthIdx.size() << std::endl;
+
+		sort(vDepthIdx.begin(), vDepthIdx.end());
+		int nPoints = 0;
+		int nMaxPoints = 100;
+
+		cv::Mat Rprev = fprev->GetRotation();
+		cv::Mat tprev = fprev->GetTranslation();
+
+		for (size_t j = 0; j < vDepthIdx.size(); j++)
+		{
+			int i = vDepthIdx[j].second;
+
+			bool bCreateNew = false;
+
+			/*MapPoint* pMP =  
+
+			if (!pMP)
+				bCreateNew = true;
+			else if (pMP->Observations() < 1)
+				bCreateNew = true;*/
+
+			if (bCreateNew)
+			{
+
+				cv::Mat x3D;
+				x3D = fprev->UnprojectStereo(i, Rprev, tprev);
+				GaussianSparseSLAM::GaussianPoint* pMP = new GaussianSparseSLAM::GaussianPoint(x3D, fprev, pMap, ts);
+
+				fprev->mvGaussianPoints.update(i, pMP);
+				lpTemporalPoints.push_back(pMP);
+				nPoints++;
+			}
+			else
+			{
+				nPoints++;
+			}
+
+			if (vDepthIdx[j].first > fprev->mThDepth && nPoints > 100)
+				break;
+
+		}
 		f2->SetPose(User->PredictPose());
 		GaussianSparseSLAM::Tracker::FrameMatch(f2, fprev, vecPrevFrame, sAleadyIdxs, spGPs);
 	}
@@ -808,18 +1565,42 @@ void TrackWithPrevFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM
 			vecKFMatches.push_back(vecNeighKF);
 		}
 	}
-	
+	 
 	int nInliers = GaussianSparseSLAM::Tracker::Track(POOL, SLAM, id, user, f2, frame_ts);
 
-	User->mnPrevFrameID = User->mnCurrFrameID.load();
-	User->mnCurrFrameID = f2->mnFrameID;
-	/*if (User->prevFrame)
-		delete User->prevFrame;*/
-	User->prevFrame = f2;
+	//User->mnPrevFrameID = User->mnCurrFrameID.load();//이전프레임매치
+	//User->mnCurrFrameID = f2->mnFrameID;
+	//if (User->prevFrame)
+	//	delete User->prevFrame;
+	//User->prevFrame = f2;
 
 	std::set<int> sTemporalIdxs;
 	if (User->GetState() == GaussianSparseSLAM::UserState::Success)
 	{
+		//update local map
+		std::vector<GaussianSparseSLAM::KeyFrame*> vpKFs;
+		std::vector<GaussianSparseSLAM::GaussianPoint*> vpMPs;
+		GaussianSparseSLAM::KeyFrame* pRefKF = nullptr;
+		cv::Mat desc;
+		std::vector<LocalKeyframeData> vecLocalKeyframeDatas;
+		std::vector<uint8_t> buffer;
+
+		GaussianSparseSLAM::Tracker::UpdateLocalKeyFrames(f2, vpKFs, pRefKF);
+		GaussianSparseSLAM::Tracker::UpdateLocalMapPoitns(f2, vpKFs, vpMPs, desc, vecLocalKeyframeDatas);
+		
+		GaussianSparseSLAM::KeyframeSerializer::serialize(buffer, vecLocalKeyframeDatas);
+		Utils::SendData("reslocalmap", user, buffer, id);
+		
+		//std::cout << "Local Map = " << id << " " << vpMPs.size() << std::endl;;
+
+
+		User->mLocalMapDescriptor = desc.clone();
+
+		if (pRefKF)
+		{
+			User->mpRefKF = pRefKF;
+		}
+
 		User->mSetMapPoints.Clear();
 		auto vpGPs = f2->mvGaussianPoints.get();
 		for (int i = 0; i < f2->N; i++)
@@ -1043,7 +1824,7 @@ void TrackWithPrevFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLAM
 				matches2.push_back(std::make_pair(pt1, pt2));
 			}
 			cv::Mat res;
-			SLAM->VisualizeMatchingImage(res, img1, img2, matches2, mapName, 5);
+			SLAM->VisualizeMatchingImage(res, img1, img2, matches2, mapName, 5, 20);
 		}
 	}
 
@@ -1274,12 +2055,18 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 		return;
 	User->mnUsed++;
 
+	//VO test용 unidepth 요청
+	{
+		std::string tsrc = src + ".GSImage";
+		Utils::SendReqMessage("requnidepth", tsrc, id);
+	}
+
 	//Image Download
 	//std::cout << "frame ts test " << frame_ts << std::endl;
 	WebAPI API(ip, port);
 	auto f = new GaussianSparseSLAM::Frame(User->mpCamera, SLAM->mpFeatureScaleInfo, id, frame_ts);
 	User->mFrames.Update(id, f);
-	User->mnCurrFrameID = id;
+	//User->mnCurrFrameID = id;//이거때문에 에러인듯
 
 	{
 		std::chrono::high_resolution_clock::time_point t_down_start = std::chrono::high_resolution_clock::now();
@@ -1294,6 +2081,7 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 	}
 
 	//auto f = User->mFrames.Get(id);
+	int previd = id - User->mnSkip;
 	auto mapStat = User->GetMap()->GetState();
 	auto userStat = User->GetState();
 
@@ -1312,7 +2100,7 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 	vecPTs.assign((cv::Point2f*)mat.datastart, (cv::Point2f*)mat.dataend);    
 
 	//descriptor download
-	float scale, zero_point;
+	/*float scale, zero_point;
 	{
 		std::stringstream ss;
 		ss << "/Download?keyword=" << "resdesc" << "&id=" << id << "&src=" << src;  
@@ -1328,8 +2116,9 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 		std::memcpy(&zero_point, float_data_ptr + sizeof(float), sizeof(float));
 		
 		Utils::dequantizeDescriptors(mat, f->mDescriptors, scale, zero_point);
-	}
+	}*/
 
+	//frame keypoints update
 	f->N = vecPTs.size();
 	for (auto pt : vecPTs)
 	{
@@ -1341,6 +2130,11 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 	f->UndistortKeyPoints();
 	f->mvuRight = std::vector<float>(f->N, -1);
 	f->mvDepth = std::vector<float>(f->N, -1);
+
+	f->mGrid = new std::vector<size_t>*[f->FRAME_GRID_COLS];
+	for (int i = 0; i < f->FRAME_GRID_COLS; i++)
+		f->mGrid[i] = new std::vector<size_t>[f->FRAME_GRID_ROWS];
+	f->AssignFeaturesToGrid();
 	
 	////초기화(맵이 없음)
 	//뎁스 요청=  src = src+.GSImage
@@ -1359,19 +2153,104 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 	//src = 
 	//id = 
 
+	auto pMap = User->GetMap();
+
 	//초기화 또는 매칭 요청
 	if (mapStat == GaussianSparseSLAM::MapState::NoImages || mapStat == GaussianSparseSLAM::MapState::NotInitialized)
 	{
 		//맵이 초기화 안되었으면 유니뎁스 요청
-		Utils::SendReqMessage("requnidepth", tsrc, id);
+		//이 부분은 일단 동작안하도록 막음.
+		//Utils::SendReqMessage("requnidepth", tsrc, id);
 		f->SetState(GaussianSparseSLAM::FrameProcessStatus::initialization);
+		
+		if (true) {
+			//매칭 요청
+			SLAM->mpInitializer->Init(f);
+			if (mapStat == GaussianSparseSLAM::MapState::NoImages)
+			{
+				pMap->SetState(GaussianSparseSLAM::MapState::NotInitialized);
+			}
+			else {
+				std::stringstream ssxfeat;
+				//src = device, target_d, target_id , ...
+				//id = frame id
+				ssxfeat << src << "." << src << "." << SLAM->mpInitializer->mpRef->mnFrameID;
+				Utils::SendReqMessage("reqmatf", ssxfeat.str(), id);
+			}
+		}
+
+		if (false)
+		{
+			auto res = SLAM->mpInitializer->Initialize(User->mpCamera->mCamSensor, f, pMap);
+			std::cout << "initinitinit" << std::endl;
+			if (res == GaussianSparseSLAM::MapState::Initialized)
+			{
+				pMap->SetState(res);
+
+				//salad
+				{
+					std::stringstream ss2;
+					ss2 << User->strMapName << "." << src << ".GSImage." << id;
+					Utils::SendReqMessage("reqmapsalad", ss2.str(), f->mnKeyFrameId);
+				}
+
+				User->SetState(GaussianSparseSLAM::UserState::Success);
+
+				//keyframe
+				std::vector < cv::Vec2i> vecDatas;
+				auto vpGPs = f->mvGaussianPoints.get();
+				for (int i = 0; i < f->N; i++)
+				{
+					auto pGP = vpGPs[i];
+					if (!pGP || pGP->isBad())
+						continue;
+					vecDatas.push_back(cv::Vec2i(i, pGP->mnId));
+				}
+
+				//사용자 주변 키프레임
+				auto kf1 = SLAM->mpInitializer->mpInitKeyFrame1;
+				auto kf2 = SLAM->mpInitializer->mpInitKeyFrame2;
+
+				kf1->sourceName = src;
+				kf2->sourceName = src;
+
+				pMap->mvpKeyFrameOrigins.push_back(kf1);
+
+				User->mpRefKF = SLAM->mpInitializer->mpInitKeyFrame2;
+				User->KeyFrames.Update(f->mnFrameID, SLAM->mpInitializer->mpInitKeyFrame2);
+				pMap->mnLastKeyFrameID = f->mnFrameID;
+
+				//frame 갱신
+				/*auto vpMPs = f->mvGaussianPoints.get();
+				for (int i = 0; i < f->N; i++)
+				{
+
+					if(f->mv)
+				}*/
+
+				cv::Mat tmp = cv::Mat(vecDatas.size(), 1, CV_32SC2, vecDatas.data());
+				std::stringstream ss;
+				ss << User->mapName << "." << src << "." << f->mnFrameID;
+				Utils::SendData("kf_gp_ids", ss.str(), tmp, kf1->mnId, 4, 2);
+				Utils::SendData("kf_gp_ids", ss.str(), tmp, kf2->mnId, 4, 2);
+				//인접 키프레임.
+				tmp = cv::Mat::ones(2000, 1, CV_32FC1) * -1;
+				Utils::SendData("reqmatches", ss.str(), tmp, kf1->mnId, 4, 1);
+				Utils::SendData("reqmatches", ss.str(), tmp, kf2->mnId, 4, 1);
+
+
+				////이전 프레임 갱신
+				//User->prevFrame = f;
+				//User->mnPrevFrameID = id;//단안초기화
+			}
+		}
 	}
 	if (mapStat == GaussianSparseSLAM::MapState::Initialized)
 	{
 		if (userStat == GaussianSparseSLAM::UserState::Success)
 		{
 			f->SetState(GaussianSparseSLAM::FrameProcessStatus::tracking);
-
+			
 			//LM 요청
 			//{
 			//	int nn = 10;
@@ -1393,56 +2272,68 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 			//	Utils::SendData("reqlmmatch", sssrc.str(), tmp, id, 4, 1);
 			//}
 
+			if(previd >= 0)
 			{
 				std::stringstream ssxfeat;
 				//src = device, target_d, target_id , ...
 				//id = frame id
-				ssxfeat << src << "." << User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId <<"."<<User->mpRefKF->mnId << "." << src << "." << User->mnPrevFrameID<<"."<<User->mnPrevFrameID;
-
-				auto vecNeigh = User->mpRefKF->GetBestCovisibilityKeyFrames(5);
-				std::set<GaussianSparseSLAM::KeyFrame*> setNeigh(vecNeigh.begin(), vecNeigh.end());
-
-				if (User->mpLastCreatedKF && User->mpRefKF && (User->mpRefKF->mnId != User->mpLastCreatedKF->mnId))
-				{
-					//ssxfeat << "." << User->mpLastCreatedKF->sourceName << "." << User->mpLastCreatedKF->mnFrameId;
-					if (!setNeigh.count(User->mpLastCreatedKF))
-						setNeigh.insert(User->mpLastCreatedKF);
-				}
-
-				for (auto pNeigh : setNeigh)
-				{
-					ssxfeat << "." << pNeigh->sourceName << "." << pNeigh->mnFrameId<<"."<<pNeigh->mnId;
-				}
-
-				//prev, reference, last_kf
-				//ssxfeat << src << "." << User->mpRefKF->mnFrameId << "." << src << "." << id << "." << User->mnPrevFrameID;
-				Utils::SendReqMessage("reqmatch", ssxfeat.str(), id);
-				//std::cout << "preprocessing " << ssxfeat.str() <<"=="<< User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId << std::endl;
+				ssxfeat <<src<<"." << src << "." << previd<<"."<<previd;
+				Utils::SendReqMessage("reqmatf", ssxfeat.str(), id);
 			}
 
+			//{
+			//	std::stringstream ssxfeat;
+			//	//src = device, target_d, target_id , ...
+			//	//id = frame id
+			//	ssxfeat << src << "." << User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId <<"."<<User->mpRefKF->mnId << "." << src << "." << User->mnPrevFrameID<<"."<<User->mnPrevFrameID;
+
+			//	auto vecNeigh = User->mpRefKF->GetBestCovisibilityKeyFrames(5);
+			//	std::set<GaussianSparseSLAM::KeyFrame*> setNeigh(vecNeigh.begin(), vecNeigh.end());
+
+			//	if (User->mpLastCreatedKF && User->mpRefKF && (User->mpRefKF->mnId != User->mpLastCreatedKF->mnId))
+			//	{
+			//		//ssxfeat << "." << User->mpLastCreatedKF->sourceName << "." << User->mpLastCreatedKF->mnFrameId;
+			//		if (!setNeigh.count(User->mpLastCreatedKF))
+			//			setNeigh.insert(User->mpLastCreatedKF);
+			//	}
+
+			//	for (auto pNeigh : setNeigh)
+			//	{
+			//		ssxfeat << "." << pNeigh->sourceName << "." << pNeigh->mnFrameId<<"."<<pNeigh->mnId;
+			//	}
+
+			//	//prev, reference, last_kf
+			//	//ssxfeat << src << "." << User->mpRefKF->mnFrameId << "." << src << "." << id << "." << User->mnPrevFrameID;
+			//	Utils::SendReqMessage("reqmatch", ssxfeat.str(), id);
+			//	//std::cout << "preprocessing " << ssxfeat.str() <<"=="<< User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId << std::endl;
+			//}
 
 			//matching test
 			//reference keyframe
-			auto pKF = User->mpRefKF;
-			if (pKF && pKF->mDescriptors.rows > 0)
+			//local map
+			//auto pKF = User->mpRefKF;
+			/*if (User->mLocalMapDescriptor.rows > 0)
 			{
 				std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 				std::vector<cv::DMatch> matches;
-				GaussianSparseSLAM::Matcher::matchEigen(matches, f->mDescriptors, pKF->mDescriptors);
+				GaussianSparseSLAM::Matcher::matchEigen(matches, f->mDescriptors, User->mLocalMapDescriptor);
 				std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
 				auto du_test1 = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-				std::cout << "match test = " << matches.size() << " " << du_test1 << std::endl;
-			}
+				std::cout << "match test = " << matches.size() << " " << du_test1 <<" "<< User->mLocalMapDescriptor.rows << std::endl;
+			}*/
 		}
 		else if (userStat == GaussianSparseSLAM::UserState::RECENTLY_LOST)
 		{
 			//최근 키프레임과 매칭
 			auto pKF = User->mpRefKF;
-			if (pKF)
+			if (previd >= 0)
 			{
+				std::string key = "reqmatf";
 				std::stringstream ssxfeat;
-				ssxfeat << src << "." << User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId<<"."<<User->mpRefKF->mnId;
-				Utils::SendReqMessage("reqmatch", ssxfeat.str(), id);
+				ssxfeat << src << "." << src<< "." << previd;
+				//ssxfeat << src << "." << User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId;
+				//ssxfeat << src << "." << User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId<<"."<<User->mpRefKF->mnId;
+				Utils::SendReqMessage(key, ssxfeat.str(), id);
 				//std::cout << "preprocessing " << ssxfeat.str() <<"=="<< User->mpRefKF->sourceName << "." << User->mpRefKF->mnFrameId << std::endl;
 			}
 		}
@@ -1471,7 +2362,7 @@ void PreprocessGaussianFrame(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::G
 		}
 	}
 
-	User->mnPrevFrameID = id;
+	//User->mnPrevFrameID = id;
 	User->mnUsed--;
 }
 
@@ -1535,8 +2426,9 @@ void GaussianFrameUpdate(ThreadPool::ThreadPool* POOL, GaussianSparseSLAM::GSSLA
 	cv::Mat visImg = img.clone();
 
 	//인코딩 정보 저장
+	
 	User->ImageDatas.Update(id, temp.clone());
-	User->mnCurrFrameID = id;
+	//User->mnCurrFrameID = id;//가우시안프레임.사용안함.
 
 	//UniDepth
 	//User->mnPrevFrameID = User->mnCurrFrameID.load();
@@ -1701,13 +2593,19 @@ int main(int argc, char* argv[])
 		std::vector<std::string> pairKeywords;
 		sendKeywords.push_back("ReferenceFrame");			pairKeywords.push_back("NONE");
 		
+		//SEg
+		sendKeywords.push_back("reqyoloseg");				pairKeywords.push_back("resdetect");
+
 		//XFeat
 		sendKeywords.push_back("reqdetect");				pairKeywords.push_back("resdetect");
+		sendKeywords.push_back("reqmatf");					pairKeywords.push_back("resmatf");
+		sendKeywords.push_back("reqmatlm");					pairKeywords.push_back("resmatf");
 		sendKeywords.push_back("reqmatch");					pairKeywords.push_back("resmatch");
 		sendKeywords.push_back("reqmatchglue");				pairKeywords.push_back("resmatchglue");
 		sendKeywords.push_back("reqmatches");				pairKeywords.push_back("NONE");
 		sendKeywords.push_back("reqkfmatches");				pairKeywords.push_back("NONE");
 		sendKeywords.push_back("reqlmmatch");				pairKeywords.push_back("NONE");
+		sendKeywords.push_back("reslocalmap");				pairKeywords.push_back("NONE");
 		sendKeywords.push_back("kf_gp_ids");				pairKeywords.push_back("NONE");
 		//맵의 키프레임들과 매칭 요청
 		sendKeywords.push_back("reqmapmatch");				pairKeywords.push_back("NONE");
@@ -1758,6 +2656,13 @@ int main(int argc, char* argv[])
 		receivedKeywords.push_back("Gyro");
 		receivedKeywords.push_back("Accelerometer");
 
+		//Semantic
+		receivedKeywords.push_back("sam2");
+		receivedKeywords.push_back("raft");
+		receivedKeywords.push_back("yoloseg");
+		receivedKeywords.push_back("yolosegc");
+		receivedKeywords.push_back("sam2c");
+
 		//가우시안 스플래팅 관련 + XFeat Match
 		receivedKeywords.push_back("GSImage");
 		receivedKeywords.push_back("FrameUpdate");
@@ -1768,6 +2673,8 @@ int main(int argc, char* argv[])
 		receivedKeywords.push_back("resmatches");
 		receivedKeywords.push_back("reskfmatches");
 		receivedKeywords.push_back("reslmmatch");
+		receivedKeywords.push_back("resmatlm");
+		receivedKeywords.push_back("resmatf");
 		receivedKeywords.push_back("resmatchglue");
 		receivedKeywords.push_back("resgaussianmapping");
 		receivedKeywords.push_back("GSDeviceConnect");
@@ -1856,6 +2763,9 @@ int main(int argc, char* argv[])
 			{
 				POOL->EnqueueJob(UpdateDepthFrame, GSSLAM, keyword, src, id, ts, false);
 			}
+			else if (keyword == "yolosegc") {
+				POOL->EnqueueJob(yoloseg, GSSLAM, keyword, src, id, ts, false);
+			}
 			else if (keyword == "FrameUpdate")
 			{
 				//이미지만 다운로드함. 현재는
@@ -1868,6 +2778,10 @@ int main(int argc, char* argv[])
 			else if (keyword == "resdetectandmatch")
 			{
 				//POOL->EnqueueJob(RequestXFeatLMMatch, POOL, GSSLAM, src, ss.str(), id, ts, ts2);
+			}
+			else if (keyword == "resmatf")
+			{
+				POOL->EnqueueJob(TrackWithLocalMap, POOL, GSSLAM, src, ss.str(), id, ts, ts2);
 			}
 			else if (keyword == "resmatch")
 			{
